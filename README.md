@@ -26,6 +26,9 @@ cheap: every data source is free.
 - **NSW fires** — [NSW RFS](https://www.rfs.nsw.gov.au) major incidents
   around the ACT border region, coloured by official alert level (the
   "Fires Near Me" feed).
+- **Local news** — RiotACT and Canberra Times headlines, merged and
+  time-sorted in the sidebar.
+- **Basemaps** — dark (CARTO), street (OSM), or satellite (Esri imagery).
 
 ## Running it
 
@@ -34,7 +37,8 @@ python3 serve.py
 ```
 
 Then open <http://localhost:8899/poc.html>. No dependencies beyond Python 3
-and a browser.
+and a browser. A `docker-compose.yml` is included for running it on a
+homelab box (put API keys in `.env` next to the app files).
 
 (`poc.html` also works opened directly as a file, but the ESA incident layer
 needs `serve.py` — the upstream feed sends no CORS headers, so the little
