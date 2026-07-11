@@ -32,6 +32,16 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.ok { background: var(--green); } #dot.err { background: var(--red); }
 
+  #bomwarn { margin-top: 8px; display: none; }
+  #bomwarn.has-warn { display: block; }
+  #bomwarn .bw { border-left: 3px solid var(--dim); padding: 3px 8px;
+    margin: 4px 0; border-radius: 0 4px 4px 0; background: #ffffff08; }
+  #bomwarn .bw.major { border-left-color: var(--red); }
+  #bomwarn .bw.moderate { border-left-color: var(--amber); }
+  #bomwarn .bw.minor { border-left-color: var(--cyan); }
+  #bomwarn .bw .bt { display: block; }
+  #bomwarn .bw .bm { color: var(--dim); font-size: 10px; }
+
   #aclist { max-height: 160px; overflow-y: auto; margin-top: 4px; }
   #newslist { max-height: 150px; overflow-y: auto; margin-top: 4px; }
   #newslist a { display: block; color: var(--fg); text-decoration: none;
@@ -61,6 +71,7 @@
   <div class="row"><span class="k">temp / feels</span><span id="wx-temp">—</span></div>
   <div class="row"><span class="k">wind</span><span id="wx-wind">—</span></div>
   <div class="row"><span class="k">conditions</span><span id="wx-cond">—</span></div>
+  <div id="bomwarn"></div>
   <hr>
   <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
     <span class="k">map</span>
@@ -324,10 +335,13 @@ map.on('load', () => {
   map.on('click', 'transit', e => {
     const p = e.features[0].properties;
     const age = p.ts ? `${Math.max(0, Math.round(Date.now() / 1000 - p.ts))}s ago` : '?';
+    const head = p.mode === 'lightrail'
+      ? (p.label || 'light rail')
+      : (p.route ? 'Route ' + p.route : 'bus');
     new maplibregl.Popup({ offset: 12 })
       .setLngLat(e.features[0].geometry.coordinates)
-      .setHTML(`<b>${p.label || p.route || '?'}</b> (${p.mode === 'lightrail' ? 'light rail' : 'bus'})<br>
-        ${p.route ? 'route: ' + p.route + '<br>' : ''}
+      .setHTML(`<b>${head}</b> (${p.mode === 'lightrail' ? 'light rail' : 'bus'})<br>
+        ${p.label ? 'vehicle: ' + p.label + '<br>' : ''}
         ${p.speed != null ? 'speed: ' + p.speed + ' km/h<br>' : ''}
         ${p.occupancy ? 'occupancy: ' + p.occupancy + '<br>' : ''}
         updated: ${age}`)
@@ -345,6 +359,7 @@ map.on('load', () => {
   fetchPower();     setInterval(fetchPower, 120000);
   fetchTransit();   setInterval(fetchTransit, 15000);
   fetchNews();      setInterval(fetchNews, 10 * 60000);
+  fetchBom();       setInterval(fetchBom, 5 * 60000);
 });
 
 function setStatus(ok, text) {
@@ -568,6 +583,30 @@ async function fetchTransit() {
     count.textContent = `(${geo.features.length})`;
   } catch (e) {
     count.textContent = '(needs serve.py)';
+  }
+}
+
+async function fetchBom() {
+  const box = document.getElementById('bomwarn');
+  try {
+    const r = await fetch('bom');
+    if (!r.ok) throw new Error(r.status);
+    const warns = await r.json();
+    // severity order so the worst sits on top
+    const rank = { major: 0, moderate: 1, minor: 2 };
+    warns.sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3));
+    box.className = warns.length ? 'has-warn' : '';
+    box.innerHTML = warns.map(w => {
+      const t = w.expires ? new Date(w.expires) : null;
+      const till = t ? `until ${t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+      return `<div class="bw ${w.severity || ''}">
+        <span class="bt">⚠ ${w.short || w.title}</span>
+        <span class="bm">${w.title !== w.short ? w.title + ' · ' : ''}${till}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.className = '';
+    box.innerHTML = '';
   }
 }
 

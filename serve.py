@@ -421,6 +421,35 @@ def _ee_future_features():
     return _ee_future_cache["feats"]
 
 
+# --- BOM warnings ------------------------------------------------------------
+# BOM's warning products carry no geometry, so this is a sidebar panel, not a
+# map layer. The location endpoint returns everything relevant to Canberra,
+# including ACT-forecast-district warnings (fire weather, severe weather,
+# total fire bans, sheep graziers, flood…). r3dp5h = Canberra geohash.
+BOM_GEOHASH = "r3dp5h"
+BOM_WARN_URL = f"https://api.weather.bom.gov.au/v1/locations/{BOM_GEOHASH}/warnings"
+BOM_CACHE_SECONDS = 300
+_bom_cache = {"time": 0.0, "body": b"[]"}
+
+
+def bom_body():
+    if time.time() - _bom_cache["time"] > BOM_CACHE_SECONDS:
+        req = urllib.request.Request(BOM_WARN_URL, headers={
+            "User-Agent": BROWSER_UA, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read()).get("data", [])
+        items = [{
+            "id": w.get("id"),
+            "title": w.get("title") or w.get("short_title"),
+            "short": w.get("short_title"),
+            "severity": w.get("warning_group_type"),  # minor/moderate/major
+            "issued": w.get("issue_time"),
+            "expires": w.get("expiry_time"),
+        } for w in data]
+        _bom_cache.update(time=time.time(), body=json.dumps(items).encode())
+    return _bom_cache["body"]
+
+
 RFS_FEED = "https://www.rfs.nsw.gov.au/feeds/majorIncidents.json"
 _rfs_cache = {"time": 0.0, "body": b""}
 
@@ -487,6 +516,17 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "rfs unreachable")
+            return
+        if self.path.rstrip("/") == "/bom":
+            try:
+                body = bom_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "BOM warnings unreachable")
             return
         if self.path.rstrip("/") == "/transit":
             try:

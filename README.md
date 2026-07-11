@@ -36,6 +36,10 @@ cheap: every data source is free.
   built-in protobuf parser — no dependencies. Live buses hook in once
   MyWayPlus API credentials are added to `.env` (`TC_VP_URL` +
   `TC_AUTH_BASIC`); keys come from the Transport Canberra developer portal.
+- **BOM warnings** — current [Bureau of Meteorology](https://www.bom.gov.au)
+  warnings for the Canberra area (fire weather, severe weather, total fire
+  bans, flood, sheep graziers…), shown as a colour-coded sidebar banner
+  ranked by severity. No key needed.
 - **Local news** — RiotACT and Canberra Times headlines, merged and
   time-sorted in the sidebar.
 - **Basemaps** — dark (CARTO), street (OSM), or satellite (Esri imagery).
@@ -69,7 +73,8 @@ Aircraft data from airplanes.live community receivers. Weather by Open-Meteo
 Agency (CC-BY 4.0) and © State of New South Wales (NSW Rural Fire Service).
 Outage data © Evoenergy and © Essential Energy, relayed from their public
 outage maps. Transit vehicle positions sourced from Transport Canberra.
-Base map © OpenStreetMap contributors, © CARTO.
+Weather warnings © Bureau of Meteorology. Base map © OpenStreetMap
+contributors, © CARTO.
 
 Incident data can affect life and property decisions — treat this as a hobby
 visualisation, not an emergency information service. Use official sources
