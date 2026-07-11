@@ -15,10 +15,11 @@
     font-family: monospace; color: var(--fg); }
   #map { position: absolute; inset: 0; }
 
-  #panel { position: absolute; top: 12px; left: 12px; width: 250px;
+  #panel { position: absolute; top: 12px; left: 12px; width: 320px;
+    max-height: calc(100vh - 24px); overflow-y: auto;
     background: var(--panel); border: 1px solid var(--dim); border-radius: 8px;
-    padding: 12px 14px; font-size: 12px; backdrop-filter: blur(4px); }
-  #panel h1 { margin: 0 0 2px; font-size: 14px; color: var(--cyan);
+    padding: 14px 18px; font-size: 14px; backdrop-filter: blur(4px); }
+  #panel h1 { margin: 0 0 2px; font-size: 17px; color: var(--cyan);
     letter-spacing: 1px; }
   #panel .sub { color: var(--dim); margin-bottom: 10px; }
   .row { display: flex; justify-content: space-between; margin: 2px 0; }
@@ -40,14 +41,14 @@
   #bomwarn .bw.moderate { border-left-color: var(--amber); }
   #bomwarn .bw.minor { border-left-color: var(--cyan); }
   #bomwarn .bw .bt { display: block; }
-  #bomwarn .bw .bm { color: var(--dim); font-size: 10px; }
+  #bomwarn .bw .bm { color: var(--dim); font-size: 11px; }
 
-  #aclist { max-height: 160px; overflow-y: auto; margin-top: 4px; }
-  #newslist { max-height: 150px; overflow-y: auto; margin-top: 4px; }
+  #aclist { max-height: 200px; overflow-y: auto; margin-top: 4px; }
+  #newslist { max-height: 190px; overflow-y: auto; margin-top: 4px; }
   #newslist a { display: block; color: var(--fg); text-decoration: none;
     padding: 2px 4px; border-radius: 4px; }
   #newslist a:hover { background: #414868; }
-  #newslist .src { color: var(--dim); font-size: 10px; }
+  #newslist .src { color: var(--dim); font-size: 11px; }
   #aclist .ac { display: grid; grid-template-columns: 70px 46px 1fr;
     gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
   #aclist .ac:hover { background: #414868; }
