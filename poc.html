@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canberra COP — proof of concept</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root {
+    --bg: #1a1b26; --panel: #24283bee; --fg: #c0caf5; --dim: #565f89;
+    --cyan: #7dcfff; --amber: #e0af68; --red: #f7768e; --green: #9ece6a;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg);
+    font-family: monospace; color: var(--fg); }
+  #map { position: absolute; inset: 0; }
+
+  #panel { position: absolute; top: 12px; left: 12px; width: 250px;
+    background: var(--panel); border: 1px solid var(--dim); border-radius: 8px;
+    padding: 12px 14px; font-size: 12px; backdrop-filter: blur(4px); }
+  #panel h1 { margin: 0 0 2px; font-size: 14px; color: var(--cyan);
+    letter-spacing: 1px; }
+  #panel .sub { color: var(--dim); margin-bottom: 10px; }
+  .row { display: flex; justify-content: space-between; margin: 2px 0; }
+  .row .k { color: var(--dim); }
+  hr { border: none; border-top: 1px solid var(--dim); margin: 8px 0; }
+  label { display: flex; gap: 6px; align-items: center; cursor: pointer;
+    margin: 3px 0; user-select: none; }
+
+  #status { display: flex; gap: 6px; align-items: center; margin-top: 8px;
+    color: var(--dim); }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  #dot.ok { background: var(--green); } #dot.err { background: var(--red); }
+
+  #aclist { max-height: 220px; overflow-y: auto; margin-top: 4px; }
+  #aclist .ac { display: grid; grid-template-columns: 70px 46px 1fr;
+    gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+  #aclist .ac:hover { background: #414868; }
+  #aclist .mil { color: var(--red); }
+  .legend { display: flex; gap: 10px; margin-top: 6px; color: var(--dim); }
+  .legend b { font-weight: normal; }
+  .lo { color: var(--amber); } .hi { color: var(--cyan); } .ml { color: var(--red); }
+
+  .maplibregl-popup-content { background: var(--panel); color: var(--fg);
+    font-family: monospace; font-size: 12px; border: 1px solid var(--dim); }
+  .maplibregl-popup-tip { border-top-color: var(--panel) !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <h1>CANBERRA COP</h1>
+  <div class="sub">proof of concept · all-source</div>
+
+  <div class="row"><span class="k">temp / feels</span><span id="wx-temp">—</span></div>
+  <div class="row"><span class="k">wind</span><span id="wx-wind">—</span></div>
+  <div class="row"><span class="k">conditions</span><span id="wx-cond">—</span></div>
+  <hr>
+  <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
+  <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
+  <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
+  <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
+  <div id="aclist"></div>
+  <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
+</div>
+
+<script>
+const CBR = { lat: -35.28, lon: 149.13, radiusNm: 60 };
+const WMO = { 0:'clear', 1:'mostly clear', 2:'partly cloudy', 3:'overcast',
+  45:'fog', 48:'rime fog', 51:'drizzle', 53:'drizzle', 55:'drizzle',
+  61:'light rain', 63:'rain', 65:'heavy rain', 71:'light snow', 73:'snow',
+  75:'heavy snow', 80:'showers', 81:'showers', 82:'heavy showers',
+  95:'thunderstorm', 96:'thunderstorm', 99:'thunderstorm' };
+
+const map = new maplibregl.Map({
+  container: 'map',
+  center: [CBR.lon, CBR.lat],
+  zoom: 9,
+  style: {
+    version: 8,
+    sources: {
+      carto: {
+        type: 'raster', tileSize: 256,
+        tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
+        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer'
+      }
+    },
+    layers: [{ id: 'base', type: 'raster', source: 'carto' }]
+  }
+});
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+// Plane icon drawn on canvas, pointing north; one per colour class since
+// canvas images can't be recoloured per-feature like SDFs.
+function planeIcon(colour) {
+  const c = document.createElement('canvas'); c.width = c.height = 36;
+  const g = c.getContext('2d');
+  g.translate(18, 18); g.fillStyle = colour;
+  g.beginPath();
+  g.moveTo(0, -13); g.lineTo(2.5, -6); g.lineTo(12, 1); g.lineTo(12, 4);
+  g.lineTo(2, 1); g.lineTo(1.5, 8); g.lineTo(5, 11); g.lineTo(5, 13);
+  g.lineTo(0, 11.5); g.lineTo(-5, 13); g.lineTo(-5, 11); g.lineTo(-1.5, 8);
+  g.lineTo(-2, 1); g.lineTo(-12, 4); g.lineTo(-12, 1); g.lineTo(-2.5, -6);
+  g.closePath(); g.fill();
+  return g.getImageData(0, 0, 36, 36);
+}
+
+const state = { planes: [], radarFrame: null };
+
+map.on('load', () => {
+  map.addImage('plane-lo',  planeIcon('#e0af68'));
+  map.addImage('plane-hi',  planeIcon('#7dcfff'));
+  map.addImage('plane-mil', planeIcon('#f7768e'));
+
+  map.addSource('aircraft', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'aircraft', type: 'symbol', source: 'aircraft',
+    layout: {
+      'icon-image': ['get', 'icon'],
+      'icon-rotate': ['get', 'track'],
+      'icon-allow-overlap': true,
+      'icon-rotation-alignment': 'map'
+    }
+  });
+
+  map.on('click', 'aircraft', e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.callsign}</b> ${p.mil === 'true' ? '⚠ MIL' : ''}<br>
+        type: ${p.type}<br>alt: ${p.alt} ft<br>
+        speed: ${p.speed} kt<br>hex: ${p.hex}`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
+
+  map.addSource('esa', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'esa', type: 'circle', source: 'esa',
+    paint: {
+      'circle-radius': 7,
+      'circle-color': ['match', ['get', 'agency'],
+        'Fire', '#f7768e', 'Ambulance', '#9ece6a', 'Rescue', '#7dcfff',
+        '#e0af68'],
+      'circle-opacity': 0.85,
+      'circle-stroke-width': 1.5,
+      'circle-stroke-color': '#1a1b26'
+    }
+  });
+  map.on('click', 'esa', e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.title}</b><br>status: ${p.status}<br>
+        agency: ${p.agency}<br>suburb: ${p.suburb}<br>updated: ${p.updated}`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'esa', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'esa', () => map.getCanvas().style.cursor = '');
+
+  fetchAircraft();  setInterval(fetchAircraft, 12000);
+  fetchRadar();     setInterval(fetchRadar, 5 * 60000);
+  fetchWeather();   setInterval(fetchWeather, 10 * 60000);
+  fetchIncidents(); setInterval(fetchIncidents, 60000);
+});
+
+function setStatus(ok, text) {
+  document.getElementById('dot').className = ok ? 'ok' : 'err';
+  document.getElementById('status-text').textContent = text;
+}
+
+async function fetchAircraft() {
+  try {
+    // airplanes.live not adsb.lol: same readsb API shape, but this one sends
+    // CORS headers so it works from a plain browser page without a proxy
+    const r = await fetch(`https://api.airplanes.live/v2/point/${CBR.lat}/${CBR.lon}/${CBR.radiusNm}`);
+    const d = await r.json();
+    state.planes = (d.ac || []).filter(a => a.lat != null);
+    renderAircraft();
+    setStatus(true, `updated ${new Date().toLocaleTimeString()}`);
+  } catch (e) { setStatus(false, 'aircraft feed error'); }
+}
+
+function renderAircraft() {
+  const feats = state.planes.map(a => {
+    const mil = ((a.dbFlags || 0) & 1) === 1;
+    const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
+    return {
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
+      properties: {
+        icon: mil ? 'plane-mil' : (alt < 10000 ? 'plane-lo' : 'plane-hi'),
+        track: a.track || 0,
+        callsign: (a.flight || a.hex).trim(),
+        type: a.t || '?', alt, speed: Math.round(a.gs || 0),
+        hex: a.hex, mil: String(mil)
+      }
+    };
+  });
+  map.getSource('aircraft').setData({ type: 'FeatureCollection', features: feats });
+  document.getElementById('ac-count').textContent = `(${feats.length})`;
+
+  document.getElementById('aclist').innerHTML = feats
+    .sort((x, y) => y.properties.alt - x.properties.alt)
+    .map(f => `<div class="ac ${f.properties.mil === 'true' ? 'mil' : ''}"
+      data-lon="${f.geometry.coordinates[0]}" data-lat="${f.geometry.coordinates[1]}">
+      <span>${f.properties.callsign}</span><span>${f.properties.type}</span>
+      <span>${f.properties.alt.toLocaleString()} ft</span></div>`).join('');
+  document.querySelectorAll('#aclist .ac').forEach(el =>
+    el.onclick = () => map.flyTo({ center: [+el.dataset.lon, +el.dataset.lat], zoom: 11 }));
+}
+
+async function fetchRadar() {
+  try {
+    const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+    const d = await r.json();
+    const frame = d.radar.past.at(-1);
+    const tiles = [`${d.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`];
+    if (map.getSource('radar')) {
+      map.removeLayer('radar'); map.removeSource('radar');
+    }
+    // RainViewer free tiles top out at z7 (placeholder images above that);
+    // maxzoom makes MapLibre overscale z7 instead of fetching the placeholders
+    map.addSource('radar', { type: 'raster', tiles, tileSize: 256, maxzoom: 7 });
+    map.addLayer({ id: 'radar', type: 'raster', source: 'radar',
+      paint: { 'raster-opacity': 0.55 } }, 'aircraft');
+    map.setLayoutProperty('radar', 'visibility',
+      document.getElementById('tog-radar').checked ? 'visible' : 'none');
+  } catch (e) { /* radar is decorative in the PoC; fail quietly */ }
+}
+
+async function fetchWeather() {
+  try {
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CBR.lat}&longitude=${CBR.lon}` +
+      '&current=temperature_2m,apparent_temperature,precipitation,weather_code,' +
+      'wind_speed_10m,wind_direction_10m,wind_gusts_10m&timezone=Australia%2FSydney');
+    const c = (await r.json()).current;
+    const dir = ['N','NE','E','SE','S','SW','W','NW'][Math.round(c.wind_direction_10m / 45) % 8];
+    document.getElementById('wx-temp').textContent =
+      `${c.temperature_2m}°C / ${c.apparent_temperature}°C`;
+    document.getElementById('wx-wind').textContent =
+      `${dir} ${c.wind_speed_10m} km/h (g ${c.wind_gusts_10m})`;
+    document.getElementById('wx-cond').textContent =
+      `${WMO[c.weather_code] || 'code ' + c.weather_code}` +
+      (c.precipitation > 0 ? `, ${c.precipitation} mm` : '');
+  } catch (e) { document.getElementById('wx-cond').textContent = 'wx error'; }
+}
+
+async function fetchIncidents() {
+  const count = document.getElementById('esa-count');
+  try {
+    // relative path → serve.py relay; upstream ESA feed sends no CORS headers
+    const r = await fetch('esa');
+    if (!r.ok) throw new Error(r.status);
+    const list = await r.json();
+    const feats = list
+      .filter(i => i.state === 'ACT' && i.point && i.point.coordinates)
+      .map(i => {
+        // description is an HTML blob of "Key: Value<br />" pairs — explode it
+        const kv = {};
+        i.description.split(/<br\s*\/?>/).forEach(line => {
+          const m = line.match(/^\s*([\w ]+):\s*(.+)$/s);
+          if (m) kv[m[1].trim().toLowerCase()] = m[2].trim();
+        });
+        // feed ships [lat, lon] as strings; GeoJSON wants numeric [lon, lat]
+        const [lat, lon] = i.point.coordinates.map(Number);
+        return {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [lon, lat] },
+          properties: {
+            title: i.title, agency: kv.agency || '?',
+            status: kv.status || '?', suburb: kv.suburb || '?',
+            updated: kv.updated || '?'
+          }
+        };
+      });
+    map.getSource('esa').setData({ type: 'FeatureCollection', features: feats });
+    count.textContent = `(${feats.length})`;
+  } catch (e) {
+    count.textContent = '(needs serve.py)';
+  }
+}
+
+document.getElementById('tog-ac').onchange = e =>
+  map.setLayoutProperty('aircraft', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-radar').onchange = e =>
+  map.getLayer('radar') &&
+  map.setLayoutProperty('radar', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-esa').onchange = e =>
+  map.setLayoutProperty('esa', 'visibility', e.target.checked ? 'visible' : 'none');
+</script>
+</body>
+</html>
