@@ -57,6 +57,12 @@
   <div class="row"><span class="k">wind</span><span id="wx-wind">—</span></div>
   <div class="row"><span class="k">conditions</span><span id="wx-cond">—</span></div>
   <hr>
+  <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
+    <span class="k">map</span>
+    <label style="margin:0"><input type="radio" name="base" value="base" checked> dark</label>
+    <label style="margin:0"><input type="radio" name="base" value="base-street"> street</label>
+    <label style="margin:0"><input type="radio" name="base" value="base-sat"> satellite</label>
+  </div>
   <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
   <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
   <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
@@ -87,9 +93,26 @@ const map = new maplibregl.Map({
         type: 'raster', tileSize: 256,
         tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
         attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer'
+      },
+      osm: {
+        type: 'raster', tileSize: 256,
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        attribution: '© OpenStreetMap contributors'
+      },
+      esri: {
+        type: 'raster', tileSize: 256,
+        // note {y}/{x} order — ArcGIS tile scheme
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'
       }
     },
-    layers: [{ id: 'base', type: 'raster', source: 'carto' }]
+    layers: [
+      { id: 'base', type: 'raster', source: 'carto' },
+      { id: 'base-street', type: 'raster', source: 'osm',
+        layout: { visibility: 'none' } },
+      { id: 'base-sat', type: 'raster', source: 'esri',
+        layout: { visibility: 'none' } }
+    ]
   }
 });
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -341,6 +364,13 @@ async function fetchIncidents() {
     count.textContent = '(needs serve.py)';
   }
 }
+
+document.querySelectorAll('#basemap input').forEach(radio =>
+  radio.onchange = () => {
+    for (const id of ['base', 'base-street', 'base-sat'])
+      map.setLayoutProperty(id, 'visibility',
+        id === radio.value ? 'visible' : 'none');
+  });
 
 document.getElementById('tog-ac').onchange = e =>
   map.setLayoutProperty('aircraft', 'visibility', e.target.checked ? 'visible' : 'none');
