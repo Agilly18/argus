@@ -75,6 +75,7 @@
   <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
   <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
   <label><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
+  <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
   <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
   <div id="aclist"></div>
   <hr>
@@ -97,11 +98,13 @@ const map = new maplibregl.Map({
   zoom: 9,
   style: {
     version: 8,
+    // needed by any symbol layer with text (transit labels)
+    glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
     sources: {
       carto: {
         type: 'raster', tileSize: 256,
         tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy'
+        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra'
       },
       osm: {
         type: 'raster', tileSize: 256,
@@ -288,6 +291,51 @@ map.on('load', () => {
   map.on('mouseenter', 'power', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'power', () => map.getCanvas().style.cursor = '');
 
+  // Transit: light rail (and buses once the MyWayPlus key lands). Purple to
+  // stand apart from every other layer; label rides above each dot.
+  map.addSource('transit', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'transit', type: 'circle', source: 'transit',
+    paint: {
+      'circle-radius': 6,
+      'circle-color': ['match', ['get', 'mode'],
+        'lightrail', '#bb9af7', '#9ece6a'],
+      'circle-opacity': 0.9,
+      'circle-stroke-width': 1.5,
+      'circle-stroke-color': '#1a1b26'
+    }
+  });
+  map.addLayer({
+    id: 'transit-label', type: 'symbol', source: 'transit',
+    layout: {
+      'text-field': ['coalesce', ['get', 'route'], ['get', 'label'], ''],
+      'text-font': ['Open Sans Regular'],
+      'text-size': 10,
+      'text-offset': [0, -1.4],
+      'text-allow-overlap': true
+    },
+    paint: {
+      'text-color': '#bb9af7',
+      'text-halo-color': '#1a1b26',
+      'text-halo-width': 1.2
+    }
+  });
+  map.on('click', 'transit', e => {
+    const p = e.features[0].properties;
+    const age = p.ts ? `${Math.max(0, Math.round(Date.now() / 1000 - p.ts))}s ago` : '?';
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.label || p.route || '?'}</b> (${p.mode === 'lightrail' ? 'light rail' : 'bus'})<br>
+        ${p.route ? 'route: ' + p.route + '<br>' : ''}
+        ${p.speed != null ? 'speed: ' + p.speed + ' km/h<br>' : ''}
+        ${p.occupancy ? 'occupancy: ' + p.occupancy + '<br>' : ''}
+        updated: ${age}`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'transit', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'transit', () => map.getCanvas().style.cursor = '');
+
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
   fetchWeather();   setInterval(fetchWeather, 10 * 60000);
@@ -295,6 +343,7 @@ map.on('load', () => {
   fetchFires();     setInterval(fetchFires, 10 * 60000);
   fetchRfs();       setInterval(fetchRfs, 60000);
   fetchPower();     setInterval(fetchPower, 120000);
+  fetchTransit();   setInterval(fetchTransit, 15000);
   fetchNews();      setInterval(fetchNews, 10 * 60000);
 });
 
@@ -437,6 +486,10 @@ document.getElementById('tog-power').onchange = e => {
   for (const id of ['power', 'power-area'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
 };
+document.getElementById('tog-transit').onchange = e => {
+  for (const id of ['transit', 'transit-label'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
 
 async function fetchFires() {
   const count = document.getElementById('fires-count');
@@ -500,6 +553,19 @@ async function fetchPower() {
     const pins = geo.features.filter(f => f.geometry.type === 'Point');
     const live = pins.filter(f => f.properties.sev !== 'scheduled').length;
     count.textContent = `(${live} live / ${pins.length - live} sched)`;
+  } catch (e) {
+    count.textContent = '(needs serve.py)';
+  }
+}
+
+async function fetchTransit() {
+  const count = document.getElementById('transit-count');
+  try {
+    const r = await fetch('transit');
+    if (!r.ok) throw new Error(r.status);
+    const geo = await r.json();
+    map.getSource('transit').setData(geo);
+    count.textContent = `(${geo.features.length})`;
   } catch (e) {
     count.textContent = '(needs serve.py)';
   }

@@ -12,6 +12,10 @@ Serves the static page and relays two feeds a browser can't reach directly:
 - /power — electricity outages as GeoJSON: Evoenergy (ACT, scraped from the
   outagesViewModel JSON embedded in their outage-map page) merged with
   Essential Energy (NSW, public KML files behind their outage map)
+- /transit — live vehicle positions as GeoJSON, decoded from GTFS-realtime
+  protobuf with a minimal stdlib parser (no protobuf dependency). Light rail
+  comes from the legacy no-auth feed; buses light up once MyWayPlus API
+  credentials land in .env (TC_VP_URL + TC_AUTH_BASIC)
 Run:  python3 serve.py  →  http://localhost:8899
 """
 import csv
@@ -19,6 +23,7 @@ import io
 import json
 import os
 import re
+import struct
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -127,6 +132,119 @@ def news_body():
         _news_cache.update(time=time.time(),
                            body=json.dumps(items[:12]).encode())
     return _news_cache["body"]
+
+
+# --- transit (GTFS-realtime) -------------------------------------------------
+# Light rail: legacy pre-MyWay+ feed, still live and needs no key.
+# Buses: MyWayPlus GTFS-R needs basic-auth credentials from the Transport
+# Canberra developer portal (manual approval). Once granted, put the vehicle-
+# positions URL and base64(client_id:client_secret) in .env as TC_VP_URL and
+# TC_AUTH_BASIC and they merge into the same /transit response.
+LIGHTRAIL_PB = "https://files.transport.act.gov.au/feeds/lightrail.pb"
+TC_VP_URL = _env.get("TC_VP_URL", "")
+TC_AUTH_BASIC = _env.get("TC_AUTH_BASIC", "")
+TRANSIT_CACHE_SECONDS = 15
+
+_transit_cache = {"time": 0.0, "body": b""}
+
+OCCUPANCY = ("empty", "many seats free", "few seats free", "standing room",
+             "crushed", "full", "not accepting passengers")
+
+
+def _varint(buf, i):
+    v = s = 0
+    while True:
+        b = buf[i]; i += 1
+        v |= (b & 0x7F) << s
+        if not b & 0x80:
+            return v, i
+        s += 7
+
+
+def _pb_fields(buf):
+    """Iterate (field_no, wire_type, value) over one protobuf message. Just
+    enough of the wire format to read a GTFS-RT FeedMessage."""
+    i, n = 0, len(buf)
+    while i < n:
+        tag, i = _varint(buf, i)
+        fno, wt = tag >> 3, tag & 7
+        if wt == 0:
+            v, i = _varint(buf, i)
+        elif wt == 1:
+            v, i = buf[i:i + 8], i + 8
+        elif wt == 2:
+            ln, i = _varint(buf, i)
+            v, i = buf[i:i + ln], i + ln
+        elif wt == 5:
+            v, i = buf[i:i + 4], i + 4
+        else:
+            raise ValueError(f"wire type {wt}")
+        yield fno, wt, v
+
+
+def _gtfsrt_vehicles(pb, mode):
+    """GTFS-RT FeedMessage bytes → vehicle-position features. Field numbers
+    are from the gtfs-realtime.proto spec (entity=2, vehicle=4, …)."""
+    feats = []
+    for fno, _, entity in _pb_fields(pb):
+        if fno != 2:  # FeedEntity
+            continue
+        vp = next((v for f, _, v in _pb_fields(entity) if f == 4), None)
+        if vp is None:  # entity is a trip update or alert, not a vehicle
+            continue
+        lat = lon = None
+        props = {"mode": mode}
+        for f, wt, v in _pb_fields(vp):
+            if f == 1:  # TripDescriptor
+                for f2, _, v2 in _pb_fields(v):
+                    if f2 == 5:
+                        props["route"] = v2.decode(errors="replace")
+            elif f == 2:  # Position (floats)
+                for f2, w2, v2 in _pb_fields(v):
+                    if w2 != 5:
+                        continue
+                    x = struct.unpack("<f", v2)[0]
+                    if f2 == 1: lat = x
+                    elif f2 == 2: lon = x
+                    elif f2 == 3: props["bearing"] = round(x)
+                    elif f2 == 5: props["speed"] = round(x * 3.6)  # m/s→km/h
+            elif f == 5:
+                props["ts"] = v
+            elif f == 8:  # VehicleDescriptor
+                for f2, _, v2 in _pb_fields(v):
+                    if f2 == 2:
+                        props["label"] = v2.decode(errors="replace")
+            elif f == 9:
+                props["occupancy"] = (OCCUPANCY[v] if v < len(OCCUPANCY)
+                                      else f"code {v}")
+        if lat is not None and lon is not None:
+            feats.append({"type": "Feature",
+                          "geometry": {"type": "Point",
+                                       "coordinates": [round(lon, 6),
+                                                       round(lat, 6)]},
+                          "properties": props})
+    return feats
+
+
+def transit_body():
+    if time.time() - _transit_cache["time"] > TRANSIT_CACHE_SECONDS:
+        feats = []
+        try:
+            feats.extend(_gtfsrt_vehicles(_http_get(LIGHTRAIL_PB), "lightrail"))
+        except Exception:
+            pass
+        if TC_VP_URL and TC_AUTH_BASIC:
+            try:
+                req = urllib.request.Request(TC_VP_URL, headers={
+                    "User-Agent": BROWSER_UA,
+                    "Authorization": "Basic " + TC_AUTH_BASIC})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    feats.extend(_gtfsrt_vehicles(r.read(), "bus"))
+            except Exception:
+                pass
+        _transit_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _transit_cache["body"]
 
 
 # --- power outages ---------------------------------------------------------
@@ -369,6 +487,17 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "rfs unreachable")
+            return
+        if self.path.rstrip("/") == "/transit":
+            try:
+                body = transit_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "transit feed unreachable")
             return
         if self.path.rstrip("/") == "/power":
             try:

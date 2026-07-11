@@ -31,6 +31,11 @@ cheap: every data source is free.
   current outages plus works scheduled in the next 7 days: outage-footprint
   polygons and pins coloured by severity (unplanned / active planned /
   scheduled).
+- **Live transit** — Canberra light rail vehicle positions (15 s refresh),
+  decoded from Transport Canberra's GTFS-realtime feed with a minimal
+  built-in protobuf parser — no dependencies. Live buses hook in once
+  MyWayPlus API credentials are added to `.env` (`TC_VP_URL` +
+  `TC_AUTH_BASIC`); keys come from the Transport Canberra developer portal.
 - **Local news** — RiotACT and Canberra Times headlines, merged and
   time-sorted in the sidebar.
 - **Basemaps** — dark (CARTO), street (OSM), or satellite (Esri imagery).
@@ -51,8 +56,8 @@ server relays it.)
 
 ## Roadmap
 
-- **Phase 2** — proper backend (FastAPI container), Transport Canberra
-  GTFS-realtime (live buses/light rail).
+- **Phase 2** — proper backend (FastAPI container), live buses via the
+  MyWayPlus GTFS-realtime API (needs an approved developer key).
 - **Phase 3** — alert rules (loitering aircraft, incidents near a watchpoint,
   storm cells inbound), per-decision saved views, time slider.
 - **Someday** — a local RTL-SDR receiver as a first-party ADS-B sensor.
@@ -63,7 +68,8 @@ Aircraft data from airplanes.live community receivers. Weather by Open-Meteo
 (CC-BY 4.0). Radar tiles by RainViewer. Incident data © ACT Emergency Services
 Agency (CC-BY 4.0) and © State of New South Wales (NSW Rural Fire Service).
 Outage data © Evoenergy and © Essential Energy, relayed from their public
-outage maps. Base map © OpenStreetMap contributors, © CARTO.
+outage maps. Transit vehicle positions sourced from Transport Canberra.
+Base map © OpenStreetMap contributors, © CARTO.
 
 Incident data can affect life and property decisions — treat this as a hobby
 visualisation, not an emergency information service. Use official sources
