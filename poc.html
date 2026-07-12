@@ -114,11 +114,13 @@
     border-radius: 4px; color: var(--fg); font-family: monospace;
     font-size: 12px; padding: 4px 6px; box-sizing: border-box; }
   #zone-name:focus, #zone-km:focus { outline: none; border-color: var(--cyan); }
-  #zone-add { background: #1a1b2680; border: 1px solid var(--dim);
-    border-radius: 4px; color: var(--cyan); font-family: monospace;
-    font-size: 12px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
-  #zone-add:hover { border-color: var(--cyan); }
-  #zone-add:disabled { color: var(--amber); cursor: crosshair; }
+  #zone-add, #zone-poly, #rb-btn { background: #1a1b2680;
+    border: 1px solid var(--dim); border-radius: 4px; color: var(--cyan);
+    font-family: monospace; font-size: 12px; padding: 4px 8px;
+    cursor: pointer; white-space: nowrap; }
+  #zone-add:hover, #zone-poly:hover, #rb-btn:hover { border-color: var(--cyan); }
+  #zone-add:disabled, #zone-poly:disabled { color: var(--amber); cursor: crosshair; }
+  #rb-btn { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
   #zonelist .zn { cursor: pointer; padding: 2px 4px; border-radius: 4px;
     font-size: 12px; }
   #zonelist .zn:hover { background: #414868; }
@@ -182,6 +184,7 @@
 
   <input id="addr-search" type="text" placeholder="search address…" autocomplete="off">
   <div id="addr-results"></div>
+  <button id="rb-btn" title="measure distance and bearing between two points">⤢ range / bearing</button>
 
   <div class="row"><span class="k">temp / feels</span><span id="wx-temp">—</span></div>
   <div class="row"><span class="k">wind</span><span id="wx-wind">—</span></div>
@@ -200,6 +203,7 @@
         <label style="margin:0"><input type="radio" name="base" value="base-sat"> satellite</label>
       </div>
       <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-trails" checked> trails</label>
       <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
       <label><input type="checkbox" id="tog-wind"> wind field</label>
       <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
@@ -224,6 +228,7 @@
         <input id="zone-name" placeholder="name" autocomplete="off" style="flex:1; min-width:0">
         <input id="zone-km" type="number" value="2" min="0.5" step="0.5" title="radius, km" style="width:56px">
         <button id="zone-add">+ place</button>
+        <button id="zone-poly" title="draw a polygon zone: click vertices, double-click to close">⬠ poly</button>
       </div>
       <label><input type="checkbox" id="tog-notify"> desktop alerts <span id="notify-note" class="k"></span></label>
     </div>
@@ -289,6 +294,27 @@ const map = new maplibregl.Map({
   }
 });
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+// Helicopter icon, FR24-style top-down: cabin + tail boom + crossed main
+// rotor blades; same colour-class scheme as the planes
+function heliIcon(colour) {
+  const c = document.createElement('canvas'); c.width = c.height = 36;
+  const g = c.getContext('2d');
+  g.translate(18, 18); g.fillStyle = colour; g.strokeStyle = colour;
+  g.beginPath(); g.ellipse(0, -2, 4.5, 7, 0, 0, 7); g.fill();   // cabin
+  g.fillRect(-1.3, 4, 2.6, 9);                                  // tail boom
+  g.fillRect(-4.5, 12, 9, 2.2);                                 // tail plane
+  g.lineWidth = 1.8;                                            // main rotor
+  g.beginPath();
+  g.moveTo(-11, -13); g.lineTo(11, 9);
+  g.moveTo(11, -13); g.lineTo(-11, 9);
+  g.stroke();
+  g.beginPath(); g.arc(0, -2, 2.2, 0, 7); g.fill();             // rotor hub
+  return g.getImageData(0, 0, 36, 36);
+}
+// rotorcraft = ADS-B emitter category A7, else type-designator prefix match
+const HELI_T = /^(R22|R44|R66|EC\d|EH10|AS[356]|AW\d|A109|A119|A139|A169|A189|B06|B105|B212|B407|B412|B429|B505|BK17|H1[23456]\d|H269|H500|MD5\d|MI\d|S61|S64|S70|S76|S92|UH1|V22)/;
+const isHeli = a => a.category === 'A7' || HELI_T.test(a.t || '');
 
 // Plane icon drawn on canvas, pointing north; one per colour class since
 // canvas images can't be recoloured per-feature like SDFs.
@@ -422,8 +448,28 @@ function circlePoly(lon, lat, km) {
   }
   return pts;
 }
+// works for both circle zones and polygon zones (ray-cast test)
+function zoneContains(z, lon, lat) {
+  if (z.type === 'poly') {
+    let inside = false;
+    const c = z.coords;
+    for (let i = 0, j = c.length - 1; i < c.length; j = i++)
+      if ((c[i][1] > lat) !== (c[j][1] > lat) &&
+          lon < (c[j][0] - c[i][0]) * (lat - c[i][1]) /
+            (c[j][1] - c[i][1]) + c[i][0])
+        inside = !inside;
+    return inside;
+  }
+  return kmDist(lat, lon, z.lat, z.lon) <= z.km;
+}
+function zoneCentre(z) {
+  if (z.type !== 'poly') return [z.lon, z.lat];
+  const pts = z.coords.slice(0, -1);
+  return [pts.reduce((s, p) => s + p[0], 0) / pts.length,
+    pts.reduce((s, p) => s + p[1], 0) / pts.length];
+}
 function zoneOf(lon, lat) {
-  const z = zones.find(w => kmDist(lat, lon, w.lat, w.lon) <= w.km);
+  const z = zones.find(w => zoneContains(w, lon, lat));
   return z ? z.name : null;
 }
 function saveZones() {
@@ -434,18 +480,18 @@ function renderZones() {
   const src = map.getSource('zones');
   if (src) src.setData({ type: 'FeatureCollection', features: zones.flatMap(w => [
     { type: 'Feature', properties: {},
-      geometry: { type: 'Polygon', coordinates: [circlePoly(w.lon, w.lat, w.km)] } },
+      geometry: { type: 'Polygon', coordinates:
+        [w.type === 'poly' ? w.coords : circlePoly(w.lon, w.lat, w.km)] } },
     { type: 'Feature', properties: { name: w.name },
-      geometry: { type: 'Point', coordinates: [w.lon, w.lat] } }
+      geometry: { type: 'Point', coordinates: zoneCentre(w) } }
   ]) });
   document.getElementById('zonelist').innerHTML = zones.map((w, i) =>
     `<div class="zn row" data-i="${i}"><span>⌂ ${w.name}
-      <span class="k">(${w.km} km)</span></span>
+      <span class="k">(${w.type === 'poly' ? 'poly' : w.km + ' km'})</span></span>
       <span class="zn-x" data-i="${i}" title="remove">×</span></div>`).join('') ||
     '<span class="k" style="font-size:11px">no zones — name one, set a radius, place it</span>';
   document.querySelectorAll('#zonelist .zn').forEach(el => el.onclick = () => {
-    const w = zones[+el.dataset.i];
-    map.flyTo({ center: [w.lon, w.lat], zoom: 12.5 });
+    map.flyTo({ center: zoneCentre(zones[+el.dataset.i]), zoom: 12.5 });
   });
   document.querySelectorAll('#zonelist .zn-x').forEach(el => el.onclick = e => {
     e.stopPropagation();
@@ -465,6 +511,120 @@ document.getElementById('zone-add').onclick = () => {
     document.getElementById('zone-name').value = '';
     saveZones(); renderStress();
     btn.textContent = '+ place'; btn.disabled = false;
+  });
+};
+
+// polygon zones: click vertices, double-click closes the ring
+document.getElementById('zone-poly').onclick = () => {
+  const btn = document.getElementById('zone-poly');
+  if (btn.disabled) return;
+  btn.textContent = 'dbl-click closes'; btn.disabled = true;
+  map.doubleClickZoom.disable();
+  const draft = [];
+  const drawDraft = () => map.getSource('draft').setData({
+    type: 'FeatureCollection', features: draft.length > 1 ? [{
+      type: 'Feature', properties: {},
+      geometry: { type: 'LineString', coordinates: draft } }] : [] });
+  const onClick = e => { draft.push([e.lngLat.lng, e.lngLat.lat]); drawDraft(); };
+  map.on('click', onClick);
+  map.once('dblclick', () => {
+    map.off('click', onClick);
+    map.doubleClickZoom.enable();
+    // the double-click also fired two click events on the same spot — dedupe
+    const pts = draft.filter((p, i) => !i ||
+      Math.abs(p[0] - draft[i - 1][0]) + Math.abs(p[1] - draft[i - 1][1]) > 1e-4);
+    if (pts.length >= 3) {
+      const name = document.getElementById('zone-name').value.trim() ||
+        'zone ' + (zones.length + 1);
+      zones.push({ name, type: 'poly', coords: [...pts, pts[0]] });
+      document.getElementById('zone-name').value = '';
+      saveZones(); renderStress();
+    }
+    map.getSource('draft').setData({ type: 'FeatureCollection', features: [] });
+    btn.textContent = '⬠ poly'; btn.disabled = false;
+  });
+};
+
+// --- geofencing: aircraft enter / dwell alerts per watch zone.
+// Enter logs only below 10 000 ft (cruise overflights are noise); dwelling
+// ≥3 min alerts once per visit; 60 s exit grace stops boundary flapping.
+const geoState = {};
+function geofence() {
+  if (!zones.length) return;
+  const now = Date.now();
+  for (const a of state.planes) {
+    if (a.alt_baro === 'ground') continue;
+    const alt = a.alt_baro || 0;
+    for (const z of zones) {
+      if (!zoneContains(z, a.lon, a.lat)) continue;
+      const key = z.name + '|' + a.hex;
+      const st = geoState[key];
+      if (!st) {
+        geoState[key] = { since: now, lastIn: now, alerted: false };
+        if (alt <= 10000) {
+          feedEvent('geo', 'geofence', {
+            title: `${(a.flight || a.hex).trim()} entered ${z.name}`,
+            cat: 'air', lon: a.lon, lat: a.lat,
+            detail: alt.toLocaleString() + ' ft' });
+          saveFeed();
+        }
+      } else {
+        st.lastIn = now;
+        if (!st.alerted && now - st.since > 180e3) {
+          st.alerted = true;
+          feedEvent('geo', 'geofence', {
+            title: `${(a.flight || a.hex).trim()} dwelling in ${z.name}`,
+            cat: 'air', lon: a.lon, lat: a.lat,
+            detail: Math.round((now - st.since) / 60e3) + ' min inside' });
+          saveFeed();
+        }
+      }
+    }
+  }
+  for (const [k, st] of Object.entries(geoState))
+    if (now - st.lastIn > 60e3) delete geoState[k];
+}
+
+// --- range & bearing: two clicks → distance + true bearing readout ---
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180,
+    dl = (lon2 - lon1) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return Math.round((Math.atan2(y, x) * 180 / Math.PI + 360) % 360);
+}
+document.getElementById('rb-btn').onclick = () => {
+  const btn = document.getElementById('rb-btn');
+  const src = map.getSource('rb');
+  if (!src) return;
+  if (btn.dataset.armed || src._data.features.length) {   // second use clears
+    delete btn.dataset.armed;
+    src.setData({ type: 'FeatureCollection', features: [] });
+    btn.textContent = '⤢ range / bearing';
+    return;
+  }
+  btn.dataset.armed = '1';
+  btn.textContent = 'click point A…';
+  map.once('click', e1 => {
+    if (!btn.dataset.armed) return;
+    const a = [e1.lngLat.lng, e1.lngLat.lat];
+    btn.textContent = 'click point B…';
+    map.once('click', e2 => {
+      if (!btn.dataset.armed) return;
+      delete btn.dataset.armed;
+      const b = [e2.lngLat.lng, e2.lngLat.lat];
+      const d = kmDist(a[1], a[0], b[1], b[0]);
+      const brg = bearingDeg(a[1], a[0], b[1], b[0]);
+      src.setData({ type: 'FeatureCollection', features: [
+        { type: 'Feature', properties: {},
+          geometry: { type: 'LineString', coordinates: [a, b] } },
+        { type: 'Feature',
+          properties: { txt: `${d.toFixed(1)} km · ${String(brg).padStart(3, '0')}°` },
+          geometry: { type: 'Point',
+            coordinates: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] } }
+      ] });
+      btn.textContent = '× clear measurement';
+    });
   });
 };
 
@@ -536,7 +696,8 @@ function saveFeed() {
 }
 const FEED_KIND = { new: ['NEW', 'var(--green)'], update: ['UPD', 'var(--amber)'],
   cleared: ['CLR', 'var(--dim)'], loiter: ['AIR', 'var(--red)'],
-  corr: ['CORR', '#bb9af7'], level: ['LVL', 'var(--cyan)'] };
+  corr: ['CORR', '#bb9af7'], level: ['LVL', 'var(--cyan)'],
+  geo: ['GEO', 'var(--amber)'] };
 // display-only noise filter: significant mode hides the routine ambulance /
 // planned-burn churn; loiter + corr always show. Events are recorded either way.
 const feedFilter = { sig: localStorage.getItem('copFeedSig') === '1' };
@@ -576,6 +737,31 @@ document.getElementById('feed-filter').onclick = e => {
   localStorage.setItem('copFeedSig', feedFilter.sig ? '1' : '0');
   renderFeed();
 };
+
+// --- breadcrumb trails: last few minutes of movement per entity ---
+const TRANSIT_HIST = {};   // id → { mode, pts: [[lon, lat, t], …] }
+function renderTrails() {
+  if (!map.getSource('trails')) return;
+  const feats = [];
+  const seg = (pts, col) => {
+    for (let i = 1; i < pts.length; i++)
+      feats.push({ type: 'Feature',
+        geometry: { type: 'LineString',
+          coordinates: [[pts[i - 1][0], pts[i - 1][1]], [pts[i][0], pts[i][1]]] },
+        properties: { col, op: 0.55 * i / pts.length } });
+  };
+  for (const a of state.planes) {
+    const h = AIR_HIST[a.hex];
+    if (!h || h.length < 2) continue;
+    const mil = ((a.dbFlags || 0) & 1) === 1;
+    const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
+    seg(h, mil ? '#f7768e' : alt < 10000 ? '#e0af68' : '#7dcfff');
+  }
+  for (const v of Object.values(TRANSIT_HIST))
+    if (v.pts.length >= 2)
+      seg(v.pts, v.mode === 'lightrail' ? '#bb9af7' : '#9ece6a');
+  map.getSource('trails').setData({ type: 'FeatureCollection', features: feats });
+}
 
 // --- loiter detection: low aircraft circling tight near an active incident ---
 const AIR_HIST = {};
@@ -814,6 +1000,9 @@ map.on('load', () => {
   map.addImage('plane-lo',  planeIcon('#e0af68'));
   map.addImage('plane-hi',  planeIcon('#7dcfff'));
   map.addImage('plane-mil', planeIcon('#f7768e'));
+  map.addImage('heli-lo',   heliIcon('#e0af68'));
+  map.addImage('heli-hi',   heliIcon('#7dcfff'));
+  map.addImage('heli-mil',  heliIcon('#f7768e'));
 
   for (const cat of ['crash', 'fire', 'burn', 'medical', 'rescue', 'hazmat',
     'storm', 'other'])
@@ -824,6 +1013,16 @@ map.on('load', () => {
   map.addImage('rfs-advice',    incidentIcon('fire', '#7dcfff', '#c0caf5'));
   map.addImage('rfs-other',     incidentIcon('fire', '#565f89', '#c0caf5'));
 
+  // breadcrumb trails: fading segments behind anything that moves —
+  // a poor man's time slider, no server state needed
+  map.addSource('trails', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'trails', type: 'line', source: 'trails',
+    paint: { 'line-color': ['get', 'col'], 'line-opacity': ['get', 'op'],
+      'line-width': 1.5 }
+  });
+
   map.addSource('aircraft', { type: 'geojson',
     data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({
@@ -833,7 +1032,10 @@ map.on('load', () => {
       'icon-rotate': ['get', 'track'],
       'icon-allow-overlap': true,
       'icon-rotation-alignment': 'map'
-    }
+    },
+    // TAK-style per-entity staleness: fade as the last message ages
+    paint: { 'icon-opacity': ['interpolate', ['linear'], ['get', 'seen'],
+      30, 1, 180, 0.3] }
   });
 
   map.on('click', 'aircraft', e => {
@@ -872,6 +1074,33 @@ map.on('load', () => {
       'text-halo-color': '#1a1b26', 'text-halo-width': 1.2 }
   });
   renderZones();
+
+  // polygon-zone draft line while drawing
+  map.addSource('draft', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'draft', type: 'line', source: 'draft',
+    paint: { 'line-color': '#7dcfff', 'line-width': 1.5,
+      'line-dasharray': [2, 2] }
+  });
+
+  // range & bearing: measured line + midpoint readout
+  map.addSource('rb', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'rb-line', type: 'line', source: 'rb',
+    filter: ['==', ['geometry-type'], 'LineString'],
+    paint: { 'line-color': '#e0af68', 'line-width': 1.6 }
+  });
+  map.addLayer({
+    id: 'rb-label', type: 'symbol', source: 'rb',
+    filter: ['==', ['geometry-type'], 'Point'],
+    layout: { 'text-field': ['get', 'txt'],
+      'text-font': ['Open Sans Regular'], 'text-size': 12,
+      'text-offset': [0, -1] },
+    paint: { 'text-color': '#e0af68', 'text-halo-color': '#1a1b26',
+      'text-halo-width': 1.4 }
+  });
 
   // correlation link lines: dashed purple threads joining two sources that
   // agree; sits under the incident pins
@@ -916,7 +1145,10 @@ map.on('load', () => {
   map.addLayer({
     id: 'esa', type: 'symbol', source: 'esa',
     filter: ['!', ['has', 'point_count']],
-    layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true }
+    // symbology discipline: glyph = incident type, size/fade = urgency
+    layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true,
+      'icon-size': ['match', ['get', 'urg'], 2, 1.18, 1, 1, 0.82] },
+    paint: { 'icon-opacity': ['match', ['get', 'urg'], 0, 0.65, 1] }
   });
   map.addLayer({
     id: 'esa-clusters', type: 'circle', source: 'esa',
@@ -1054,7 +1286,9 @@ map.on('load', () => {
       'circle-radius': 6,
       'circle-color': ['match', ['get', 'mode'],
         'lightrail', '#bb9af7', '#9ece6a'],
-      'circle-opacity': 0.9,
+      // stale positions fade (age in seconds, stamped at fetch time)
+      'circle-opacity': ['interpolate', ['linear'],
+        ['coalesce', ['get', 'age'], 0], 60, 0.9, 300, 0.3],
       'circle-stroke-width': 1.5,
       'circle-stroke-color': '#1a1b26'
     }
@@ -1144,7 +1378,9 @@ document.getElementById('pinleg').innerHTML =
   `<div class="pl"><img src="${iconURL('fire', '#e0af68', '#c0caf5')}" alt="">` +
     `nsw rfs — white ring, colour = alert level</div>` +
   `<div class="plnote">◍ hollow ring = power outage · ` +
-    `⬤ orange circle = satellite hotspot (size = fire power)</div>`;
+    `⬤ orange circle = satellite hotspot (size = fire power)</div>` +
+  `<div class="plnote">urgency: bold+large = on scene · normal = responding ` +
+    `· faded+small = pending</div>`;
 document.getElementById('pinleg-h').onclick = () => {
   const open = document.getElementById('pinleg').classList.toggle('open');
   document.getElementById('pinleg-a').textContent = open ? '▾' : '▸';
@@ -1194,6 +1430,8 @@ async function fetchAircraft() {
     state.planes = (d.ac || []).filter(a => a.lat != null);
     renderAircraft();
     detectLoiter();
+    geofence();
+    renderTrails();
     setStatus(true, `updated ${new Date().toLocaleTimeString()}`);
     mark('air', true);
   } catch (e) { setStatus(false, 'aircraft feed error'); mark('air', false); }
@@ -1203,15 +1441,17 @@ function renderAircraft() {
   const feats = state.planes.map(a => {
     const mil = ((a.dbFlags || 0) & 1) === 1;
     const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
+    const kind = isHeli(a) ? 'heli' : 'plane';
     return {
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
       properties: {
-        icon: mil ? 'plane-mil' : (alt < 10000 ? 'plane-lo' : 'plane-hi'),
+        icon: `${kind}-${mil ? 'mil' : alt < 10000 ? 'lo' : 'hi'}`,
         track: a.track || 0,
         callsign: (a.flight || a.hex).trim(),
         type: a.t || '?', alt, speed: Math.round(a.gs || 0),
-        hex: a.hex, mil: String(mil)
+        hex: a.hex, mil: String(mil),
+        seen: a.seen ?? 0   // seconds since last message → staleness fade
       }
     };
   });
@@ -1340,6 +1580,9 @@ async function fetchIncidents() {
         // feed ships [lat, lon] as strings; GeoJSON wants numeric [lon, lat]
         const [lat, lon] = i.point.coordinates.map(Number);
         const cat = categorise(i.title);
+        // urgency from CAD status: 2 = on scene, 1 = responding, 0 = pending
+        const st = (kv.status || '').toUpperCase();
+        const urg = /ON SCENE/.test(st) ? 2 : /ROUTE|RESPOND/.test(st) ? 1 : 0;
         return {
           type: 'Feature',
           geometry: { type: 'Point', coordinates: [lon, lat] },
@@ -1347,7 +1590,7 @@ async function fetchIncidents() {
             title: i.title, agency: kv.agency || '?',
             status: kv.status || '?', suburb: kv.suburb || '?',
             updated: kv.updated || '?',
-            guid: i.guid || i.title, cat, icon: 'esa-' + cat
+            guid: i.guid || i.title, cat, icon: 'esa-' + cat, urg
           }
         };
       });
@@ -1379,6 +1622,8 @@ document.getElementById('tog-ac').onchange = e =>
 document.getElementById('tog-radar').onchange = e =>
   map.getLayer('radar') &&
   map.setLayoutProperty('radar', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-trails').onchange = e =>
+  map.setLayoutProperty('trails', 'visibility', e.target.checked ? 'visible' : 'none');
 document.getElementById('tog-esa').onchange = e => {
   for (const id of ['esa', 'esa-clusters', 'esa-cluster-count'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
@@ -1532,8 +1777,24 @@ async function fetchTransit() {
     const r = await fetch('transit');
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
+    // stamp position age (staleness fade) + collect breadcrumb history
+    const now = Date.now() / 1000;
+    geo.features.forEach(f => {
+      const p = f.properties;
+      p.age = p.ts ? Math.max(0, Math.round(now - p.ts)) : 0;
+      const id = p.label || p.route;
+      if (!id) return;
+      const h = TRANSIT_HIST[id] = TRANSIT_HIST[id] || { mode: p.mode, pts: [] };
+      const [lon, lat] = f.geometry.coordinates;
+      const last = h.pts.at(-1);
+      if (!last || last[0] !== lon || last[1] !== lat) h.pts.push([lon, lat, now]);
+      if (h.pts.length > 16) h.pts.shift();
+    });
+    for (const k of Object.keys(TRANSIT_HIST))   // forget vanished vehicles
+      if (now - TRANSIT_HIST[k].pts.at(-1)[2] > 300) delete TRANSIT_HIST[k];
     map.getSource('transit').setData(geo);
     count.textContent = `(${geo.features.length})`;
+    renderTrails();
     mark('transit', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
