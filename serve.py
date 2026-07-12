@@ -20,6 +20,8 @@ Serves the static page and relays two feeds a browser can't reach directly:
   row per station as GeoJSON
 - /closures — ACT road closures as GeoJSON from the TCCS ArcGIS layer,
   active now or starting within 24 h
+- /quakes — Geoscience Australia earthquakes (7-day window), slimmed to
+  Australian events plus a box around SE Australia
 Run:  python3 serve.py  →  http://localhost:8899
 """
 import csv
@@ -638,6 +640,51 @@ def closures_body():
     return _closures_cache["body"]
 
 
+# --- earthquakes -------------------------------------------------------------
+# Geoscience Australia's GeoServer WFS; the 7-day layer is global (~50
+# events), so keep Australian-flagged quakes plus anything in a box around
+# SE Australia (offshore Tasman events aren't flagged in-Australia). The raw
+# blob is ~90 KB of solver metadata — slim it to what the popup needs.
+QUAKES_URL = ("https://earthquakes.ga.gov.au/geoserver/earthquakes/ows"
+              "?service=WFS&version=1.0.0&request=GetFeature"
+              "&typeName=earthquakes:earthquakes_seven_days"
+              "&outputFormat=application/json")
+QUAKES_BBOX = (140.0, -44.0, 155.0, -28.0)  # lon/lat box, SE Aus + offshore
+QUAKES_CACHE_SECONDS = 600
+_quakes_cache = {"time": 0.0, "body": b""}
+
+
+def quakes_body():
+    if time.time() - _quakes_cache["time"] > QUAKES_CACHE_SECONDS:
+        data = json.loads(_http_get(QUAKES_URL))
+        w, s, e, n = QUAKES_BBOX
+        feats = []
+        for f in data.get("features", []):
+            lon, lat = f["geometry"]["coordinates"][:2]
+            p = f["properties"]
+            if p.get("located_in_australia") != "Y" and not (
+                    w < lon < e and s < lat < n):
+                continue
+            mag = p.get("preferred_magnitude")
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {
+                    "id": p.get("earthquake_id") or p.get("event_id"),
+                    "mag": round(mag, 1) if mag is not None else None,
+                    "place": p.get("description") or "?",
+                    "time": p.get("epicentral_time"),
+                    "depth": round(p["depth"]) if p.get("depth") is not None
+                             else None,
+                    "felt": p.get("felt_reports_count") or 0,
+                    "url": p.get("felt_report_url") or "",
+                }})
+        feats.sort(key=lambda f: f["properties"]["time"] or "", reverse=True)
+        _quakes_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _quakes_cache["body"]
+
+
 # --- SITREP: bundle the cached feed state and have a local LLM write the
 # situation summary. Ollama runs on the desktop; its firewall admits only
 # ace2, which is exactly where this server lives in production.
@@ -720,6 +767,21 @@ def _sitrep_context():
             if warns else "none"))
     except Exception:
         lines.append("BOM warnings: feed unavailable")
+    try:
+        # quakes are rare — only worth a line when felt or roughly nearby
+        import math
+        qs = []
+        for f in json.loads(quakes_body())["features"]:
+            lon, lat = f["geometry"]["coordinates"]
+            p = f["properties"]
+            near = math.hypot((lon - 149.13) * 92, (lat + 35.28) * 111) < 300
+            if p["felt"] or near:
+                qs.append(f"M{p['mag']} {p['place']} ({p['time']}"
+                          f"{', felt reports: ' + str(p['felt']) if p['felt'] else ''})")
+        if qs:
+            lines.append("Earthquakes (7 days): " + "; ".join(qs[:5]))
+    except Exception:
+        pass
     try:
         stations = json.loads(airq_body())["features"]
         worst = max(stations, key=lambda f: f["properties"].get("aqi", 0),
@@ -889,6 +951,17 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "BOM warnings unreachable")
+            return
+        if self.path.rstrip("/") == "/quakes":
+            try:
+                body = quakes_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "earthquake feed unreachable")
             return
         if self.path.rstrip("/") == "/airq":
             try:

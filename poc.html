@@ -214,6 +214,7 @@
       <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-closures" checked> road closures <span id="closures-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-airq" checked> air quality <span id="airq-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-quakes" checked> earthquakes <span id="quakes-count" style="color:var(--dim)"></span></label>
       <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
       <div class="row" id="pinleg-h" title="what the incident pin glyphs mean">
         <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
@@ -272,7 +273,7 @@ const map = new maplibregl.Map({
       carto: {
         type: 'raster', tileSize: 256,
         tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra · air/roads: ACT Gov'
+        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra · air/roads: ACT Gov · quakes: Geoscience Australia'
       },
       osm: {
         type: 'raster', tileSize: 256,
@@ -335,7 +336,7 @@ function planeIcon(colour) {
 
 const state = { planes: [], radarFrame: null, esaFeats: [],
   rfsFeats: [], firmsFeats: [], powerFeats: [], bomWarns: [], wx: null,
-  airqFeats: [], closureFeats: [] };
+  airqFeats: [], closureFeats: [], quakeFeats: [] };
 
 // --- source freshness: every fetcher reports in; dots go green/amber/red ---
 // amber = last success older than 2.5× the poll interval; red = latest
@@ -345,7 +346,7 @@ const HEALTH = {
   esa: { iv: 60e3 }, firms: { iv: 600e3 }, rfs: { iv: 60e3 },
   power: { iv: 120e3 }, transit: { iv: 15e3 }, news: { iv: 600e3 },
   bom: { iv: 300e3 }, wind: { iv: 1800e3 }, airq: { iv: 900e3 },
-  roads: { iv: 600e3 }
+  roads: { iv: 600e3 }, quake: { iv: 600e3 }
 };
 function mark(src, ok) {
   const h = HEALTH[src]; if (!h) return;
@@ -385,6 +386,7 @@ const CAT = {
   air:     { col: '#f7768e', emoji: '🚁', label: 'aircraft' },
   road:    { col: '#e0af68', emoji: '🚧', label: 'road closure' },
   aq:      { col: '#73daca', emoji: '🌫️', label: 'air quality' },
+  quake:   { col: '#bb9af7', emoji: '📳', label: 'earthquake' },
   other:   { col: '#565f89', emoji: '📍', label: 'other' }
 };
 function categorise(title) {
@@ -872,6 +874,13 @@ function computeStress() {
   // planned roadworks aren't stress; emergency-type closures are
   add('road closures', state.closureFeats.filter(f =>
     f.properties.active && f.properties.ctype === 'emergency').length * 5, 10);
+  // a quake only registers if recent and roughly local (≤300 km, last 24 h)
+  add('earthquakes', state.quakeFeats.reduce((t, f) => {
+    const p = f.properties;
+    if (p.ageH > 24 || kmDist(f.geometry.coordinates[1],
+        f.geometry.coordinates[0], CBR.lat, CBR.lon) > 300) return t;
+    return t + (p.mag >= 4 ? 15 : p.mag >= 3 ? 8 : 4);
+  }, 0), 15);
   const cut = Date.now() - 30 * 60e3;
   add('recent alerts', feedState.events.filter(e =>
     e.t > cut && (e.kind === 'loiter' || e.kind === 'corr')).length * 5, 10);
@@ -1433,6 +1442,39 @@ map.on('load', () => {
   map.on('mouseenter', 'airq', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'airq', () => map.getCanvas().style.cursor = '');
 
+  // Earthquakes: hollow purple epicentre rings, radius scales with magnitude,
+  // fading over the 7-day window (age stamped client-side at fetch)
+  map.addSource('quakes', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'quakes', type: 'circle', source: 'quakes',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'],
+        ['coalesce', ['get', 'mag'], 1], 1, 4, 3, 9, 5, 16, 6.5, 26],
+      'circle-color': '#bb9af7',
+      'circle-opacity': 0.12,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#bb9af7',
+      'circle-stroke-opacity': ['interpolate', ['linear'],
+        ['coalesce', ['get', 'ageH'], 0], 6, 0.95, 168, 0.35]
+    }
+  }, 'esa');
+  map.on('click', 'quakes', e => {
+    const p = e.features[0].properties;
+    const when = p.time ? new Date(p.time).toLocaleString([],
+      { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>M${p.mag} earthquake</b><br>${p.place}<br>
+        time: ${when}<br>depth: ${p.depth ?? '?'} km<br>
+        felt reports: ${p.felt}` +
+        (p.url ? `<br><a href="${p.url}" target="_blank" rel="noopener"
+          style="color:#7dcfff">GA event page ↗</a>` : ''))
+      .addTo(map);
+  });
+  map.on('mouseenter', 'quakes', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'quakes', () => map.getCanvas().style.cursor = '');
+
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
   fetchWeather();   setInterval(fetchWeather, 10 * 60000);
@@ -1445,6 +1487,7 @@ map.on('load', () => {
   fetchBom();       setInterval(fetchBom, 5 * 60000);
   fetchAirq();      setInterval(fetchAirq, 15 * 60000);
   fetchClosures();  setInterval(fetchClosures, 10 * 60000);
+  fetchQuakes();    setInterval(fetchQuakes, 10 * 60000);
   renderFeed();     setInterval(renderFeed, 60000); // keep the ages fresh
   renderHealth();
   renderStress();   setInterval(renderStress, 60000); // decay 'recent alerts'
@@ -1490,7 +1533,8 @@ document.getElementById('pinleg').innerHTML =
     `road closure (grey = starts within 24 h)</div>` +
   `<div class="plnote">◍ hollow ring = power outage · ` +
     `⬤ orange circle = satellite hotspot (size = fire power) · ` +
-    `⬤ numbered disc = air quality station (colour = AQI band)</div>` +
+    `⬤ numbered disc = air quality station (colour = AQI band) · ` +
+    `◯ purple ring = earthquake (size = magnitude, fades with age)</div>` +
   `<div class="plnote">urgency: bold+large = on scene · normal = responding ` +
     `· faded+small = pending</div>`;
 document.getElementById('pinleg-h').onclick = () => {
@@ -1795,6 +1839,8 @@ document.getElementById('tog-airq').onchange = e => {
   for (const id of ['airq', 'airq-label'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
 };
+document.getElementById('tog-quakes').onchange = e =>
+  map.setLayoutProperty('quakes', 'visibility', e.target.checked ? 'visible' : 'none');
 
 async function fetchFires() {
   const count = document.getElementById('fires-count');
@@ -1973,6 +2019,38 @@ async function fetchClosures() {
   } catch (e) {
     count.textContent = '(needs serve.py)';
     mark('roads', false);
+  }
+}
+
+async function fetchQuakes() {
+  const count = document.getElementById('quakes-count');
+  try {
+    const r = await fetch('quakes');
+    if (!r.ok) throw new Error(r.status);
+    const geo = await r.json();
+    const now = Date.now();
+    geo.features.forEach(f => {
+      f.properties.ageH = f.properties.time
+        ? Math.max(0, (now - Date.parse(f.properties.time)) / 3600e3) : 0;
+    });
+    map.getSource('quakes').setData(geo);
+    state.quakeFeats = geo.features;
+    count.textContent = `(${geo.features.length}/7d)`;
+    // new quakes are feed-worthy; magnitude revisions surface as UPD
+    feedDiff('quakes', geo.features.map(f => {
+      const p = f.properties;
+      return {
+        id: String(p.id), title: `M${p.mag} quake — ${p.place}`,
+        status: 'M' + p.mag, cat: 'quake',
+        detail: (p.depth != null ? p.depth + ' km deep' : '') +
+          (p.felt ? ` · ${p.felt} felt reports` : ''),
+        lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] };
+    }));
+    renderStress();
+    mark('quake', true);
+  } catch (e) {
+    count.textContent = '(needs serve.py)';
+    mark('quake', false);
   }
 }
 
