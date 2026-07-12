@@ -212,6 +212,8 @@
       <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-closures" checked> road closures <span id="closures-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-airq" checked> air quality <span id="airq-count" style="color:var(--dim)"></span></label>
       <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
       <div class="row" id="pinleg-h" title="what the incident pin glyphs mean">
         <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
@@ -270,7 +272,7 @@ const map = new maplibregl.Map({
       carto: {
         type: 'raster', tileSize: 256,
         tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra'
+        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra · air/roads: ACT Gov'
       },
       osm: {
         type: 'raster', tileSize: 256,
@@ -332,7 +334,8 @@ function planeIcon(colour) {
 }
 
 const state = { planes: [], radarFrame: null, esaFeats: [],
-  rfsFeats: [], firmsFeats: [], powerFeats: [], bomWarns: [], wx: null };
+  rfsFeats: [], firmsFeats: [], powerFeats: [], bomWarns: [], wx: null,
+  airqFeats: [], closureFeats: [] };
 
 // --- source freshness: every fetcher reports in; dots go green/amber/red ---
 // amber = last success older than 2.5× the poll interval; red = latest
@@ -341,7 +344,8 @@ const HEALTH = {
   air: { iv: 12e3 }, radar: { iv: 300e3 }, wx: { iv: 600e3 },
   esa: { iv: 60e3 }, firms: { iv: 600e3 }, rfs: { iv: 60e3 },
   power: { iv: 120e3 }, transit: { iv: 15e3 }, news: { iv: 600e3 },
-  bom: { iv: 300e3 }, wind: { iv: 1800e3 }
+  bom: { iv: 300e3 }, wind: { iv: 1800e3 }, airq: { iv: 900e3 },
+  roads: { iv: 600e3 }
 };
 function mark(src, ok) {
   const h = HEALTH[src]; if (!h) return;
@@ -379,6 +383,8 @@ const CAT = {
   storm:   { col: '#2ac3de', emoji: '🌩️', label: 'storm/ses' },
   power:   { col: '#e0af68', emoji: '⚡', label: 'power' },
   air:     { col: '#f7768e', emoji: '🚁', label: 'aircraft' },
+  road:    { col: '#e0af68', emoji: '🚧', label: 'road closure' },
+  aq:      { col: '#73daca', emoji: '🌫️', label: 'air quality' },
   other:   { col: '#565f89', emoji: '📍', label: 'other' }
 };
 function categorise(title) {
@@ -431,11 +437,23 @@ function incidentIcon(cat, fill, stroke = '#1a1b26') {
       g.moveTo(2, -9); g.lineTo(-5, 1); g.lineTo(-1, 1); g.lineTo(-2, 9);
       g.lineTo(5, -2); g.lineTo(1, -2); g.closePath(); g.fill();
       break;
+    case 'road': // no-entry bar
+      g.rect(-7, -2.5, 14, 5); g.fill();
+      break;
     default:
       g.arc(0, 0, 3.5, 0, 7); g.fill();
   }
   return g.getImageData(0, 0, 30, 30);
 }
+
+// Australian AQI bands (NSW/ACT scheme): station discs + feed entries use
+// the band, the stress index only scores fair-or-worse
+const AQI_BANDS = [ // [floor, label, colour]
+  [200, 'HAZARDOUS', '#bb9af7'], [150, 'VERY POOR', '#f7768e'],
+  [100, 'POOR', '#ff9e64'], [67, 'FAIR', '#e0af68'],
+  [34, 'GOOD', '#73daca'], [0, 'VERY GOOD', '#9ece6a']
+];
+const aqiBand = aqi => AQI_BANDS.find(b => (aqi || 0) >= b[0]);
 
 // --- watch zones: named circles; events inside get boosted + tagged ---
 let zones = JSON.parse(localStorage.getItem('copZones') || '[]');
@@ -847,6 +865,13 @@ function computeStress() {
     if (state.wx.precip >= 5) wx += 5;
   }
   add('weather', wx, 20);
+  // air quality: worst station AQI; anything under FAIR is background
+  const worstAqi = Math.max(0, ...state.airqFeats.map(f => f.properties.aqi || 0));
+  add('air quality', worstAqi >= 200 ? 20 : worstAqi >= 150 ? 15 :
+    worstAqi >= 100 ? 10 : worstAqi >= 67 ? 4 : 0, 20);
+  // planned roadworks aren't stress; emergency-type closures are
+  add('road closures', state.closureFeats.filter(f =>
+    f.properties.active && f.properties.ctype === 'emergency').length * 5, 10);
   const cut = Date.now() - 30 * 60e3;
   add('recent alerts', feedState.events.filter(e =>
     e.t > cut && (e.kind === 'loiter' || e.kind === 'corr')).length * 5, 10);
@@ -946,7 +971,14 @@ function corrRecords() {
         sat: p.satellite, frp: p.frp, ts };
     }).filter(h => now - h.ts < 12 * 3600e3),
     power: state.powerFeats.map(f => ({ ...pt(f), id: String(f.properties.id),
-      sev: f.properties.sev, customers: f.properties.customers }))
+      sev: f.properties.sev, customers: f.properties.customers })),
+    // only live emergency/weather closures correlate — a crash next to a
+    // months-old roadworks site is coincidence, not causation
+    closures: state.closureFeats.filter(f => f.properties.active &&
+      ['emergency', 'inclementWeather'].includes(f.properties.ctype))
+      .map(f => ({ ...pt(f), id: String(f.properties.id),
+        title: f.properties.roads || f.properties.title,
+        suburb: f.properties.suburb }))
   };
 }
 function correlate() {
@@ -981,6 +1013,12 @@ function correlate() {
   pairUp('rfs-firms', s.rfs, s.firms, 3, (r, h) => ({ src: 'RFS+FIRMS',
     cat: 'fire', title: `satellite confirms: ${r.title}`,
     detail: `${h.sat} hotspot · ${h.frp} MW` }));
+  // emergency road closure next to a crash/storm/fire → cause found
+  pairUp('esa-closure', s.esa.filter(e =>
+    ['crash', 'storm', 'fire'].includes(e.cat)), s.closures, 2,
+    (e, c) => ({ src: 'ESA+closures', cat: e.cat,
+      title: `road closed near: ${e.title}`,
+      detail: (c.suburb ? c.suburb + ' · ' : '') + c.title.slice(0, 60) }));
   // unplanned outage next to a crash/storm/fire → probable cause found
   pairUp('power-esa', s.power.filter(p => p.sev === 'unplanned'),
     s.esa.filter(e => ['crash', 'storm', 'fire'].includes(e.cat)), 1.5,
@@ -1012,6 +1050,9 @@ map.on('load', () => {
   map.addImage('rfs-watch',     incidentIcon('fire', '#e0af68', '#c0caf5'));
   map.addImage('rfs-advice',    incidentIcon('fire', '#7dcfff', '#c0caf5'));
   map.addImage('rfs-other',     incidentIcon('fire', '#565f89', '#c0caf5'));
+  // road closures: amber bar = closed now, grey = starts within 24 h
+  map.addImage('closure-on',    incidentIcon('road'));
+  map.addImage('closure-soon',  incidentIcon('road', '#565f89'));
 
   // breadcrumb trails: fading segments behind anything that moves —
   // a poor man's time slider, no server state needed
@@ -1326,6 +1367,72 @@ map.on('load', () => {
   map.on('mouseenter', 'transit', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'transit', () => map.getCanvas().style.cursor = '');
 
+  // Road closures: no-entry pins, dimmed while the closure is still upcoming
+  map.addSource('closures', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'closures', type: 'symbol', source: 'closures',
+    layout: {
+      'icon-image': ['case', ['to-boolean', ['get', 'active']],
+        'closure-on', 'closure-soon'],
+      'icon-allow-overlap': true
+    }
+  });
+  map.on('click', 'closures', e => {
+    const p = e.features[0].properties;
+    const fmt = t => t ? new Date(+t).toLocaleString([],
+      { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
+    new maplibregl.Popup({ offset: 12, maxWidth: '320px' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.suburb || 'road closure'}</b>` +
+        `${String(p.active) === 'true' ? '' : ' (upcoming)'}<br>
+        ${p.roads ? p.roads + '<br>' : ''}
+        ${p.reason ? 'why: ' + p.reason + '<br>' : ''}
+        type: ${p.ctype}<br>from: ${fmt(p.start)}<br>until: ${fmt(p.end)}`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'closures', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'closures', () => map.getCanvas().style.cursor = '');
+
+  // Air quality: three fixed stations; disc colour = AQI band, number = AQI
+  map.addSource('airq', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'airq', type: 'circle', source: 'airq',
+    paint: {
+      'circle-radius': 10,
+      'circle-color': ['step', ['coalesce', ['get', 'aqi'], 0],
+        '#9ece6a', 34, '#73daca', 67, '#e0af68', 100, '#ff9e64',
+        150, '#f7768e', 200, '#bb9af7'],
+      'circle-opacity': 0.85,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#1a1b26'
+    }
+  });
+  map.addLayer({
+    id: 'airq-label', type: 'symbol', source: 'airq',
+    layout: { 'text-field': ['to-string', ['round', ['coalesce', ['get', 'aqi'], 0]]],
+      'text-font': ['Open Sans Regular'], 'text-size': 10,
+      'text-allow-overlap': true },
+    paint: { 'text-color': '#1a1b26' }
+  });
+  map.on('click', 'airq', e => {
+    const p = e.features[0].properties;
+    const row = (k, label, unit) => p[k] != null
+      ? `${label}: ${p[k]}${unit}<br>` : '';
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.station}</b> — AQI ${Math.round(p.aqi || 0)} ` +
+        `${aqiBand(p.aqi)[1]}<br>` +
+        row('pm25', 'PM2.5', ' µg/m³') + row('pm10', 'PM10', ' µg/m³') +
+        row('o3', 'O₃ 1 h', ' ppm') + row('co', 'CO', ' ppm') +
+        row('no2', 'NO₂', ' ppm') +
+        `updated: ${(p.updated || '?').replace('T', ' ').slice(0, 16)}`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'airq', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'airq', () => map.getCanvas().style.cursor = '');
+
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
   fetchWeather();   setInterval(fetchWeather, 10 * 60000);
@@ -1336,6 +1443,8 @@ map.on('load', () => {
   fetchTransit();   setInterval(fetchTransit, 15000);
   fetchNews();      setInterval(fetchNews, 10 * 60000);
   fetchBom();       setInterval(fetchBom, 5 * 60000);
+  fetchAirq();      setInterval(fetchAirq, 15 * 60000);
+  fetchClosures();  setInterval(fetchClosures, 10 * 60000);
   renderFeed();     setInterval(renderFeed, 60000); // keep the ages fresh
   renderHealth();
   renderStress();   setInterval(renderStress, 60000); // decay 'recent alerts'
@@ -1377,8 +1486,11 @@ document.getElementById('pinleg').innerHTML =
       `${CAT[cat].label}</div>`).join('') +
   `<div class="pl"><img src="${iconURL('fire', '#e0af68', '#c0caf5')}" alt="">` +
     `nsw rfs — white ring, colour = alert level</div>` +
+  `<div class="pl"><img src="${iconURL('road')}" alt="">` +
+    `road closure (grey = starts within 24 h)</div>` +
   `<div class="plnote">◍ hollow ring = power outage · ` +
-    `⬤ orange circle = satellite hotspot (size = fire power)</div>` +
+    `⬤ orange circle = satellite hotspot (size = fire power) · ` +
+    `⬤ numbered disc = air quality station (colour = AQI band)</div>` +
   `<div class="plnote">urgency: bold+large = on scene · normal = responding ` +
     `· faded+small = pending</div>`;
 document.getElementById('pinleg-h').onclick = () => {
@@ -1677,6 +1789,12 @@ document.getElementById('tog-transit').onchange = e => {
   for (const id of ['transit', 'transit-label'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
 };
+document.getElementById('tog-closures').onchange = e =>
+  map.setLayoutProperty('closures', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-airq').onchange = e => {
+  for (const id of ['airq', 'airq-label'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
 
 async function fetchFires() {
   const count = document.getElementById('fires-count');
@@ -1799,6 +1917,62 @@ async function fetchTransit() {
   } catch (e) {
     count.textContent = '(needs serve.py)';
     mark('transit', false);
+  }
+}
+
+async function fetchAirq() {
+  const count = document.getElementById('airq-count');
+  try {
+    const r = await fetch('airq');
+    if (!r.ok) throw new Error(r.status);
+    const geo = await r.json();
+    map.getSource('airq').setData(geo);
+    state.airqFeats = geo.features;
+    const worst = Math.max(0, ...geo.features.map(f => f.properties.aqi || 0));
+    count.textContent = geo.features.length
+      ? `(worst ${Math.round(worst)})` : '';
+    // band changes surface in the feed: "Civic air quality FAIR → POOR"
+    feedDiff('air quality', geo.features.map(f => ({
+      id: f.properties.station,
+      title: `${f.properties.station} air quality`,
+      status: aqiBand(f.properties.aqi)[1],
+      cat: 'aq', detail: `AQI ${Math.round(f.properties.aqi || 0)}`,
+      lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    renderStress();
+    mark('airq', true);
+  } catch (e) {
+    count.textContent = '(needs serve.py)';
+    mark('airq', false);
+  }
+}
+
+async function fetchClosures() {
+  const count = document.getElementById('closures-count');
+  try {
+    const r = await fetch('closures');
+    if (!r.ok) throw new Error(r.status);
+    const geo = await r.json();
+    map.getSource('closures').setData(geo);
+    state.closureFeats = geo.features;
+    const active = geo.features.filter(f => f.properties.active);
+    count.textContent =
+      `(${active.length} now / ${geo.features.length - active.length} soon)`;
+    // feed sees both states, so an upcoming one flipping live logs as UPD
+    feedDiff('road closures', geo.features.map(f => {
+      const p = f.properties;
+      return {
+        id: String(p.id),
+        title: (p.suburb ? p.suburb + ' — ' : '') +
+          ((p.roads || p.title).split('.')[0].slice(0, 70) || 'road closure'),
+        status: p.active ? 'closed' : 'upcoming',
+        cat: 'road', detail: p.ctype,
+        lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] };
+    }));
+    correlate();
+    mark('roads', true);
+  } catch (e) {
+    count.textContent = '(needs serve.py)';
+    mark('roads', false);
   }
 }
 

@@ -16,6 +16,10 @@ Serves the static page and relays two feeds a browser can't reach directly:
   protobuf with a minimal stdlib parser (no protobuf dependency). Light rail
   comes from the legacy no-auth feed; buses light up once MyWayPlus API
   credentials land in .env (TC_VP_URL + TC_AUTH_BASIC)
+- /airq — ACT air quality stations (data.act.gov.au Socrata), latest hourly
+  row per station as GeoJSON
+- /closures — ACT road closures as GeoJSON from the TCCS ArcGIS layer,
+  active now or starting within 24 h
 Run:  python3 serve.py  →  http://localhost:8899
 """
 import csv
@@ -526,6 +530,114 @@ def rfs_body():
     return _rfs_cache["body"]
 
 
+# --- ACT air quality ---------------------------------------------------------
+# data.act.gov.au Socrata dataset 94a5-zqnn: hourly rows per station
+# (Civic / Florey / Monash). Anonymous SODA reads work; newest-first order
+# lets us keep just the latest row per station. aqi_site is the station's
+# overall AQI (Australian bands: 0-33 very good … 200+ hazardous).
+AIRQ_URL = ("https://www.data.act.gov.au/resource/94a5-zqnn.json"
+            "?%24order=datetime%20DESC&%24limit=9")
+AIRQ_CACHE_SECONDS = 900  # readings are hourly; no point hammering Socrata
+_airq_cache = {"time": 0.0, "body": b""}
+
+
+def airq_body():
+    if time.time() - _airq_cache["time"] > AIRQ_CACHE_SECONDS:
+        rows = json.loads(_http_get(AIRQ_URL))
+        feats, seen = [], set()
+
+        def num(row, k):
+            # gas readings are hundredths of a ppm — keep 3 decimals
+            try:
+                return round(float(row[k]), 3)
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        for row in rows:  # newest first — first hit per station wins
+            name = row.get("name")
+            gps = row.get("gps") or {}
+            if not name or name in seen or "latitude" not in gps:
+                continue
+            seen.add(name)
+            props = {"station": name, "updated": row.get("datetime", "")}
+            for out, col in (("aqi", "aqi_site"), ("pm25", "pm2_5"),
+                             ("pm10", "pm10"), ("o3", "o3_1hr"),
+                             ("co", "co"), ("no2", "no2")):
+                v = num(row, col)
+                if v is not None:
+                    props[out] = v
+            feats.append({"type": "Feature",
+                          "geometry": {"type": "Point", "coordinates":
+                                       [float(gps["longitude"]),
+                                        float(gps["latitude"])]},
+                          "properties": props})
+        _airq_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _airq_cache["body"]
+
+
+# --- ACT road closures -------------------------------------------------------
+# The data.act.gov.au "Unplanned Road Closures" dataset is only an href card;
+# the data lives in a TCCS ArcGIS layer. The similarly-named live layer is a
+# graveyard of 2005-2017 "until further notice" rows — the actively-maintained
+# one is Road_Closures_public_view_HISTORICAL_ACTUAL (edited daily). Dates are
+# epoch-ms UTC; the where clause needs TIMESTAMP literals (a bare epoch number
+# comparison silently matches nothing).
+CLOSURES_URL = ("https://services1.arcgis.com/E5n4f1VY84i0xSjy/arcgis/rest/"
+                "services/Road_Closures_public_view_HISTORICAL_ACTUAL/"
+                "FeatureServer/0/query")
+CLOSURES_CACHE_SECONDS = 600
+CLOSURES_LOOKAHEAD_HOURS = 24  # show what's about to close, not just what is
+_closures_cache = {"time": 0.0, "body": b""}
+
+
+def _strip_html(s):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+
+def closures_body():
+    if time.time() - _closures_cache["time"] > CLOSURES_CACHE_SECONDS:
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        ts = lambda d: d.strftime("TIMESTAMP '%Y-%m-%d %H:%M:%S'")
+        qs = urllib.parse.urlencode({
+            "where": (f"startTimeClosure <= "
+                      f"{ts(now + timedelta(hours=CLOSURES_LOOKAHEAD_HOURS))}"
+                      f" AND endTimeClosure >= {ts(now)}"),
+            "outFields": "globalid,projectTitle,type,roadsClosed,"
+                         "reasonRoadClosure,suburb1,startTimeClosure,"
+                         "endTimeClosure",
+            "f": "json"})
+        data = json.loads(_http_get(f"{CLOSURES_URL}?{qs}"))
+        if "error" in data:
+            raise ValueError(data["error"])
+        now_ms = now.timestamp() * 1000
+        feats = []
+        for f in data.get("features", []):
+            a, g = f["attributes"], f.get("geometry")
+            if not g:
+                continue
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "Point",
+                             "coordinates": [g["x"], g["y"]]},
+                "properties": {
+                    "id": a.get("globalid") or "?",
+                    "title": _strip_html(a.get("projectTitle"))[:120],
+                    "ctype": a.get("type") or "other",
+                    "suburb": (a.get("suburb1") or "").replace("_", " ").title(),
+                    "roads": _strip_html(a.get("roadsClosed"))[:400],
+                    "reason": _strip_html(a.get("reasonRoadClosure"))[:200],
+                    "start": a.get("startTimeClosure"),
+                    "end": a.get("endTimeClosure"),
+                    "active": bool(a.get("startTimeClosure") and
+                                   a["startTimeClosure"] <= now_ms),
+                }})
+        _closures_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _closures_cache["body"]
+
+
 # --- SITREP: bundle the cached feed state and have a local LLM write the
 # situation summary. Ollama runs on the desktop; its firewall admits only
 # ace2, which is exactly where this server lives in production.
@@ -608,6 +720,30 @@ def _sitrep_context():
             if warns else "none"))
     except Exception:
         lines.append("BOM warnings: feed unavailable")
+    try:
+        stations = json.loads(airq_body())["features"]
+        worst = max(stations, key=lambda f: f["properties"].get("aqi", 0),
+                    default=None)
+        if worst:
+            p = worst["properties"]
+            lines.append(f"Air quality: worst station {p['station']} "
+                         f"AQI {p.get('aqi', '?')}")
+    except Exception:
+        pass
+    try:
+        act = [f["properties"] for f in json.loads(closures_body())["features"]
+               if f["properties"]["active"]]
+        # routine roadworks would drown the summary — detail emergencies only
+        urgent = [c for c in act
+                  if c["ctype"] in ("emergency", "inclementWeather")]
+        line = (f"Road closures: {len(act)} active "
+                f"(mostly routine roadworks/construction)")
+        if urgent:
+            line += "; EMERGENCY closures: " + "; ".join(
+                f"{c['suburb'] or '?'}: {c['roads'][:60]}" for c in urgent[:5])
+        lines.append(line)
+    except Exception:
+        pass
     return "\n".join(lines)
 
 
@@ -753,6 +889,28 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "BOM warnings unreachable")
+            return
+        if self.path.rstrip("/") == "/airq":
+            try:
+                body = airq_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "air quality feed unreachable")
+            return
+        if self.path.rstrip("/") == "/closures":
+            try:
+                body = closures_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "closures feed unreachable")
             return
         if self.path.rstrip("/") == "/transit":
             try:

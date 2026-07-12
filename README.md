@@ -78,6 +78,9 @@ Outage data © Evoenergy and © Essential Energy, relayed from their public
 outage maps. Transit vehicle positions sourced from Transport Canberra.
 Weather warnings © Bureau of Meteorology. Geocoding © OpenStreetMap
 contributors via Nominatim. Base map © OpenStreetMap contributors, © CARTO.
+Air quality data © Australian Capital Territory (CC-BY 4.0, via
+data.act.gov.au). Road closure data © Transport Canberra and City Services —
+Roads ACT (CC-BY-SA 4.0).
 
 Incident data can affect life and property decisions — treat this as a hobby
 visualisation, not an emergency information service. Use official sources
