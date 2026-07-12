@@ -70,6 +70,22 @@
     padding: 2px 4px; border-radius: 4px; }
   #newslist a:hover { background: #414868; }
   #newslist .src { color: var(--dim); font-size: 11px; }
+  #sitrep-btn { width: 100%; box-sizing: border-box; margin-top: 8px;
+    background: #1a1b2680; border: 1px solid var(--dim); border-radius: 4px;
+    color: var(--cyan); font-family: monospace; font-size: 12px;
+    padding: 5px 8px; cursor: pointer; letter-spacing: 1px; }
+  #sitrep-btn:hover { border-color: var(--cyan); }
+  #sitrep-btn:disabled { color: var(--dim); cursor: wait; }
+  #sitrep-box { display: none; margin-top: 6px; padding: 6px 8px;
+    border-left: 3px solid var(--cyan); background: #ffffff08;
+    border-radius: 0 4px 4px 0; font-size: 12px; line-height: 1.45; }
+  #sitrep-box .sm { color: var(--dim); font-size: 10px; display: block;
+    margin-top: 4px; }
+  #health { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+    font-size: 10px; color: var(--dim); }
+  #health .hs { display: flex; align-items: center; gap: 3px; cursor: default; }
+  #health .hs i { width: 7px; height: 7px; border-radius: 50%;
+    background: #565f89; display: inline-block; }
   #feedlist { max-height: 230px; overflow-y: auto; margin-top: 4px; }
   .fe { display: flex; gap: 7px; padding: 3px 6px; margin: 3px 0;
     border-left: 3px solid var(--dim); border-radius: 0 4px 4px 0;
@@ -106,6 +122,8 @@
   <div class="row"><span class="k">wind</span><span id="wx-wind">—</span></div>
   <div class="row"><span class="k">conditions</span><span id="wx-cond">—</span></div>
   <div id="bomwarn"></div>
+  <button id="sitrep-btn">◆ SITREP</button>
+  <div id="sitrep-box"></div>
   <hr>
   <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
     <span class="k">map</span>
@@ -129,6 +147,7 @@
   <hr>
   <div class="row"><span class="k">canberra news</span><span id="news-note" style="color:var(--dim)"></span></div>
   <div id="newslist"></div>
+  <div id="health"></div>
   <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
 </div>
 
@@ -193,6 +212,39 @@ function planeIcon(colour) {
 }
 
 const state = { planes: [], radarFrame: null, esaFeats: [] };
+
+// --- source freshness: every fetcher reports in; dots go green/amber/red ---
+// amber = last success older than 2.5× the poll interval; red = latest
+// attempt failed; grey = never heard from
+const HEALTH = {
+  air: { iv: 12e3 }, radar: { iv: 300e3 }, wx: { iv: 600e3 },
+  esa: { iv: 60e3 }, firms: { iv: 600e3 }, rfs: { iv: 60e3 },
+  power: { iv: 120e3 }, transit: { iv: 15e3 }, news: { iv: 600e3 },
+  bom: { iv: 300e3 }
+};
+function mark(src, ok) {
+  const h = HEALTH[src]; if (!h) return;
+  if (ok) h.lastOk = Date.now(); else h.lastErr = Date.now();
+  renderHealth();
+}
+function renderHealth() {
+  const now = Date.now();
+  document.getElementById('health').innerHTML =
+    Object.entries(HEALTH).map(([n, h]) => {
+      let col = '#565f89', t = 'no data yet';
+      if (h.lastErr && (!h.lastOk || h.lastErr > h.lastOk)) {
+        col = 'var(--red)'; t = 'FAILING';
+      } else if (h.lastOk && now - h.lastOk > 2.5 * h.iv) {
+        col = 'var(--amber)'; t = 'stale';
+      } else if (h.lastOk) { col = 'var(--green)'; t = 'ok'; }
+      const age = h.lastOk ? Math.round((now - h.lastOk) / 1000) : null;
+      const ageTxt = age == null ? '' :
+        ', last ok ' + (age < 90 ? age + 's' : Math.round(age / 60) + 'm') + ' ago';
+      return `<span class="hs" title="${n}: ${t}${ageTxt}">` +
+        `<i style="background:${col}"></i>${n}</span>`;
+    }).join('');
+}
+setInterval(renderHealth, 10000);
 
 // --- incident taxonomy: category from title keywords → colour + icon ---
 // planned burns get their own muted class so real fires stand out
@@ -570,7 +622,33 @@ map.on('load', () => {
   fetchNews();      setInterval(fetchNews, 10 * 60000);
   fetchBom();       setInterval(fetchBom, 5 * 60000);
   renderFeed();     setInterval(renderFeed, 60000); // keep the ages fresh
+  renderHealth();
 });
+
+// SITREP: serve.py bundles current feed state → local Ollama writes the
+// summary. Server caches 5 min; generation itself can take ~15-30 s.
+document.getElementById('sitrep-btn').onclick = async () => {
+  const btn = document.getElementById('sitrep-btn');
+  const box = document.getElementById('sitrep-box');
+  if (box.style.display === 'block' && !btn.disabled) {
+    box.style.display = 'none'; return;   // second click folds it away
+  }
+  btn.disabled = true; btn.textContent = '◆ generating…';
+  try {
+    const r = await fetch('sitrep');
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    const age = Math.round((Date.now() / 1000 - d.generated) / 60);
+    box.innerHTML = d.text.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+      `<span class="sm">${d.model} · generated ${age < 1 ? 'just now'
+        : age + ' min ago'}</span>`;
+    box.style.display = 'block';
+  } catch (e) {
+    box.innerHTML = 'SITREP unavailable (needs serve.py + Ollama reachable)';
+    box.style.display = 'block';
+  }
+  btn.disabled = false; btn.textContent = '◆ SITREP';
+};
 
 function setStatus(ok, text) {
   document.getElementById('dot').className = ok ? 'ok' : 'err';
@@ -587,7 +665,8 @@ async function fetchAircraft() {
     renderAircraft();
     detectLoiter();
     setStatus(true, `updated ${new Date().toLocaleTimeString()}`);
-  } catch (e) { setStatus(false, 'aircraft feed error'); }
+    mark('air', true);
+  } catch (e) { setStatus(false, 'aircraft feed error'); mark('air', false); }
 }
 
 function renderAircraft() {
@@ -635,7 +714,8 @@ async function fetchRadar() {
       paint: { 'raster-opacity': 0.55 } }, 'aircraft');
     map.setLayoutProperty('radar', 'visibility',
       document.getElementById('tog-radar').checked ? 'visible' : 'none');
-  } catch (e) { /* radar is decorative in the PoC; fail quietly */ }
+    mark('radar', true);
+  } catch (e) { mark('radar', false); /* decorative; fail quietly */ }
 }
 
 async function fetchWeather() {
@@ -652,7 +732,11 @@ async function fetchWeather() {
     document.getElementById('wx-cond').textContent =
       `${WMO[c.weather_code] || 'code ' + c.weather_code}` +
       (c.precipitation > 0 ? `, ${c.precipitation} mm` : '');
-  } catch (e) { document.getElementById('wx-cond').textContent = 'wx error'; }
+    mark('wx', true);
+  } catch (e) {
+    document.getElementById('wx-cond').textContent = 'wx error';
+    mark('wx', false);
+  }
 }
 
 async function fetchIncidents() {
@@ -693,8 +777,10 @@ async function fetchIncidents() {
       status: f.properties.status, cat: f.properties.cat,
       detail: f.properties.suburb,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    mark('esa', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
+    mark('esa', false);
   }
 }
 
@@ -770,8 +856,10 @@ async function fetchFires() {
     const geo = await r.json();
     map.getSource('fires').setData(geo);
     count.textContent = `(${geo.features.length})`;
+    mark('firms', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
+    mark('firms', false);
   }
 }
 
@@ -813,8 +901,10 @@ async function fetchRfs() {
       status: f.properties.status, cat: 'fire',
       detail: f.properties.category,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    mark('rfs', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
+    mark('rfs', false);
   }
 }
 
@@ -838,8 +928,10 @@ async function fetchPower() {
         status: f.properties.sev + '|' + (f.properties.eta || ''),
         cat: 'power', detail: `${f.properties.customers ?? '?'} customers`,
         lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    mark('power', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
+    mark('power', false);
   }
 }
 
@@ -851,8 +943,10 @@ async function fetchTransit() {
     const geo = await r.json();
     map.getSource('transit').setData(geo);
     count.textContent = `(${geo.features.length})`;
+    mark('transit', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
+    mark('transit', false);
   }
 }
 
@@ -876,9 +970,11 @@ async function fetchBom() {
       </div>`;
     }).join('');
     box.querySelectorAll('.bw').forEach(el => el.onclick = () => toggleBom(el));
+    mark('bom', true);
   } catch (e) {
     box.className = '';
     box.innerHTML = '';
+    mark('bom', false);
   }
 }
 
@@ -914,7 +1010,8 @@ async function fetchNews() {
       `<a href="${i.link}" target="_blank" rel="noopener">${i.title}
        <span class="src">— ${i.source}, ${ago(i.ts)} ago</span></a>`).join('');
     note.textContent = '';
-  } catch (e) { note.textContent = '(needs serve.py)'; }
+    mark('news', true);
+  } catch (e) { note.textContent = '(needs serve.py)'; mark('news', false); }
 }
 
 // Traffic tiles cost API quota, so the layer is off by default and only

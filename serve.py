@@ -526,6 +526,124 @@ def rfs_body():
     return _rfs_cache["body"]
 
 
+# --- SITREP: bundle the cached feed state and have a local LLM write the
+# situation summary. Ollama runs on the desktop; its firewall admits only
+# ace2, which is exactly where this server lives in production.
+OLLAMA_URL = _env.get("OLLAMA_URL", "http://192.168.0.234:11434")
+OLLAMA_MODEL = _env.get("OLLAMA_MODEL", "qwen3.5:9b")
+SITREP_CACHE_SECONDS = 300
+_sitrep_cache = {"time": 0.0, "body": b""}
+_wx_cache = {"time": 0.0, "data": {}}
+
+
+def _wx_current():
+    if time.time() - _wx_cache["time"] > 600:
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=-35.28"
+               "&longitude=149.13&current=temperature_2m,weather_code,"
+               "wind_speed_10m,wind_gusts_10m&timezone=Australia%2FSydney")
+        with urllib.request.urlopen(url, timeout=10) as r:
+            _wx_cache.update(time=time.time(),
+                             data=json.loads(r.read()).get("current", {}))
+    return _wx_cache["data"]
+
+
+def _kv_from_desc(desc):
+    return {m[0].strip().lower(): m[1].strip()
+            for m in re.findall(r"([A-Za-z ]+):\s*(.*?)<br", desc + "<br")}
+
+
+def _sitrep_context():
+    # each source guarded: one dead feed shouldn't kill the summary
+    lines = []
+    try:
+        wx = _wx_current()
+        lines.append(f"Weather: {wx.get('temperature_2m')}°C, wind "
+                     f"{wx.get('wind_speed_10m')} km/h gusting "
+                     f"{wx.get('wind_gusts_10m')} km/h")
+    except Exception:
+        pass
+    try:
+        act = [i for i in json.loads(esa_body()) if i.get("state") == "ACT"]
+        descs = []
+        for i in act:
+            kv = _kv_from_desc(i.get("description", ""))
+            descs.append(f"{i['title']} ({kv.get('suburb', '?')}, "
+                         f"status: {kv.get('status', '?')})")
+        lines.append(f"ACT ESA incidents ({len(descs)}): " +
+                     ("; ".join(descs[:25]) if descs else "none"))
+    except Exception:
+        lines.append("ACT ESA incidents: feed unavailable")
+    try:
+        rfs = json.loads(rfs_body())["features"]
+        near = []
+        for f in rfs:
+            g = f["geometry"]
+            if g["type"] == "GeometryCollection":
+                g = next((x for x in g["geometries"] if x["type"] == "Point"), None)
+            if not g or g["type"] != "Point":
+                continue
+            lon, lat = g["coordinates"][:2]
+            if 148.2 < lon < 150.5 and -36.5 < lat < -34.2:
+                near.append(f"{f['properties']['title']} "
+                            f"[{f['properties']['category']}]")
+        lines.append("NSW RFS alerts nearby: " +
+                     ("; ".join(near) if near else "none"))
+    except Exception:
+        lines.append("NSW RFS alerts: feed unavailable")
+    try:
+        pins = [f for f in json.loads(power_body())["features"]
+                if f["geometry"]["type"] == "Point"
+                and f["properties"].get("sev") != "scheduled"]
+        descs = [f"{p['properties'].get('otype', 'power')} outage, "
+                 f"{p['properties'].get('customers', '?')} customers "
+                 f"({str(p['properties'].get('where', ''))[:50]})" for p in pins]
+        lines.append(f"Live power outages ({len(descs)}): " +
+                     ("; ".join(descs[:10]) if descs else "none"))
+    except Exception:
+        lines.append("Power outages: feed unavailable")
+    try:
+        warns = json.loads(bom_body())
+        lines.append("BOM warnings: " + ("; ".join(
+            f"{w['title']} [{w.get('severity', '?')}]" for w in warns)
+            if warns else "none"))
+    except Exception:
+        lines.append("BOM warnings: feed unavailable")
+    return "\n".join(lines)
+
+
+def sitrep_body():
+    if time.time() - _sitrep_cache["time"] > SITREP_CACHE_SECONDS:
+        prompt = (
+            "You are the duty officer on a Canberra situational-awareness "
+            "watch floor. Write a terse SITREP of 3-5 sentences from the "
+            "data below. Lead with anything urgent. Planned hazard-reduction "
+            "burns are routine — do not present them as emergencies. Mention "
+            "live power outages with customer counts, weather warnings, and "
+            "notable weather. Plain prose, no preamble, no headings, no "
+            "markdown.\n\n" + _sitrep_context())
+        payload = json.dumps({
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            # qwen3.5 is a hybrid-reasoning model: without think=false it
+            # burns the whole budget on chain-of-thought and never answers
+            "think": False,
+            "stream": False,
+            "options": {"num_predict": 400, "temperature": 0.3},
+        }).encode()
+        req = urllib.request.Request(
+            OLLAMA_URL + "/api/chat", data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            data = json.loads(r.read())
+        text = (data.get("message", {}).get("content") or "").strip()
+        if not text:
+            raise ValueError("empty completion")
+        body = json.dumps({"text": text, "generated": int(time.time()),
+                           "model": OLLAMA_MODEL}).encode()
+        _sitrep_cache.update(time=time.time(), body=body)
+    return _sitrep_cache["body"]
+
+
 def tomtom_tile(z, x, y):
     key = f"{z}/{x}/{y}"
     hit = _tile_cache.get(key)
@@ -555,6 +673,17 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "tomtom unreachable")
+            return
+        if self.path.rstrip("/") == "/sitrep":
+            try:
+                body = sitrep_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "sitrep generation failed")
             return
         if self.path.rstrip("/") == "/news":
             try:
