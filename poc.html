@@ -96,6 +96,20 @@
   #health .hs { display: flex; align-items: center; gap: 3px; cursor: default; }
   #health .hs i { width: 7px; height: 7px; border-radius: 50%;
     background: #565f89; display: inline-block; }
+  .sec-h { cursor: pointer; user-select: none; }
+  .sec-h:hover .k { color: var(--fg); }
+  .sec.closed .sec-b { display: none; }
+
+  #pinleg-h { cursor: pointer; user-select: none; }
+  #pinleg { display: none; }
+  #pinleg.open { display: block; }
+  #pinleg .pl { display: flex; align-items: center; gap: 7px;
+    font-size: 11px; margin: 1px 0; }
+  #pinleg .pl img { width: 18px; height: 18px; }
+  #pinleg .plnote { color: var(--dim); font-size: 11px; margin: 3px 0 2px; }
+
+  #stress-spark { opacity: .85; align-self: center; }
+
   #feed-filter { cursor: pointer; color: var(--dim); }
   #feed-filter:hover { color: var(--fg); }
   #feed-filter.sig { color: var(--cyan); }
@@ -144,7 +158,9 @@
   <div class="sub">proof of concept · all-source</div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
-    <span class="k">stress index</span><span id="stress-val">—</span></div>
+    <span class="k">stress index</span>
+    <canvas id="stress-spark" width="64" height="14" title="last 24 h"></canvas>
+    <span id="stress-val">—</span></div>
   <div id="stress-bar"><i id="stress-fill"></i></div>
   <div id="stress-parts"></div>
 
@@ -158,30 +174,43 @@
   <button id="sitrep-btn">◆ SITREP</button>
   <div id="sitrep-box"></div>
   <hr>
-  <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
-    <span class="k">map</span>
-    <label style="margin:0"><input type="radio" name="base" value="base" checked> dark</label>
-    <label style="margin:0"><input type="radio" name="base" value="base-street"> street</label>
-    <label style="margin:0"><input type="radio" name="base" value="base-sat"> satellite</label>
+  <div class="sec" data-sec="layers">
+    <div class="row sec-h"><span class="k">layers</span><span class="k sec-a">▾</span></div>
+    <div class="sec-b">
+      <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
+        <span class="k">map</span>
+        <label style="margin:0"><input type="radio" name="base" value="base" checked> dark</label>
+        <label style="margin:0"><input type="radio" name="base" value="base-street"> street</label>
+        <label style="margin:0"><input type="radio" name="base" value="base-sat"> satellite</label>
+      </div>
+      <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
+      <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
+      <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
+      <div class="row" id="pinleg-h" title="what the incident pin glyphs mean">
+        <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
+      <div id="pinleg"></div>
+      <div id="aclist"></div>
+    </div>
   </div>
-  <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
-  <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
-  <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
-  <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
-  <div id="aclist"></div>
   <hr>
-  <div class="row"><span class="k">event feed</span>
-    <span><span id="feed-filter" title="significant hides routine ambulance / planned-burn churn">all</span>
-    <span id="feed-note" style="color:var(--dim)"></span></span></div>
-  <div id="feedlist"></div>
+  <div class="sec" data-sec="feed">
+    <div class="row sec-h"><span class="k">event feed</span>
+      <span><span id="feed-filter" title="significant hides routine ambulance / planned-burn churn">all</span>
+      <span id="feed-note" style="color:var(--dim)"></span> <span class="k sec-a">▾</span></span></div>
+    <div class="sec-b"><div id="feedlist"></div></div>
+  </div>
   <hr>
-  <div class="row"><span class="k">canberra news</span><span id="news-note" style="color:var(--dim)"></span></div>
-  <div id="newslist"></div>
+  <div class="sec" data-sec="news">
+    <div class="row sec-h"><span class="k">canberra news</span>
+      <span><span id="news-note" style="color:var(--dim)"></span> <span class="k sec-a">▾</span></span></div>
+    <div class="sec-b"><div id="newslist"></div></div>
+  </div>
   <div id="health"></div>
   <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
 </div>
@@ -418,7 +447,8 @@ function renderFeed() {
     if (e.lon != null) map.flyTo({ center: [e.lon, e.lat], zoom: 13 });
   });
 }
-document.getElementById('feed-filter').onclick = () => {
+document.getElementById('feed-filter').onclick = e => {
+  e.stopPropagation(); // it lives inside a collapsible section header
   feedFilter.sig = !feedFilter.sig;
   localStorage.setItem('copFeedSig', feedFilter.sig ? '1' : '0');
   renderFeed();
@@ -517,9 +547,34 @@ const STRESS_LVL = [ // [floor, label, colour]
   [70, 'HIGH', 'var(--red)'], [45, 'ELEVATED', 'var(--amber)'],
   [20, 'GUARDED', 'var(--cyan)'], [0, 'LOW', 'var(--green)']
 ];
+// 24 h score history → tiny trend line; one sample per 5 min is plenty
+function stressSpark(total) {
+  // don't record the empty-page 0 before any source has reported in
+  if (!Object.values(HEALTH).some(h => h.lastOk)) return;
+  let hist = JSON.parse(localStorage.getItem('copStressHist') || '[]');
+  const now = Date.now();
+  if (!hist.length || now - hist.at(-1)[0] > 5 * 60e3) {
+    hist.push([now, total]);
+    hist = hist.filter(([t]) => now - t < 24 * 3600e3);
+    localStorage.setItem('copStressHist', JSON.stringify(hist));
+  }
+  const cv = document.getElementById('stress-spark');
+  const g = cv.getContext('2d');
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (hist.length < 2) return;
+  const ymax = Math.max(40, ...hist.map(h => h[1]));
+  g.strokeStyle = '#7dcfff'; g.lineWidth = 1; g.beginPath();
+  hist.forEach(([t, v], i) => {
+    const x = (1 - (now - t) / (24 * 3600e3)) * (cv.width - 1);
+    const y = cv.height - 1 - (v / ymax) * (cv.height - 2);
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  });
+  g.stroke();
+}
 function renderStress() {
   const { total, parts } = computeStress();
   const [, label, col] = STRESS_LVL.find(l => total >= l[0]);
+  stressSpark(total);
   const val = document.getElementById('stress-val');
   val.textContent = `${total} ${label}`;
   val.style.color = col;
@@ -655,12 +710,42 @@ map.on('load', () => {
       'line-opacity': 0.7, 'line-dasharray': [2, 2] }
   });
 
+  // ESA pins cluster at low zoom (the inner-city ambulance blob is unreadable
+  // otherwise); zoom past clusterMaxZoom and the taxonomy glyphs return
   map.addSource('esa', { type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] } });
+    data: { type: 'FeatureCollection', features: [] },
+    cluster: true, clusterMaxZoom: 11, clusterRadius: 42 });
   map.addLayer({
     id: 'esa', type: 'symbol', source: 'esa',
+    filter: ['!', ['has', 'point_count']],
     layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true }
   });
+  map.addLayer({
+    id: 'esa-clusters', type: 'circle', source: 'esa',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#24283b',
+      'circle-radius': ['step', ['get', 'point_count'], 12, 10, 16],
+      'circle-opacity': 0.85,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#7dcfff'
+    }
+  });
+  map.addLayer({
+    id: 'esa-cluster-count', type: 'symbol', source: 'esa',
+    filter: ['has', 'point_count'],
+    layout: { 'text-field': ['get', 'point_count_abbreviated'],
+      'text-font': ['Open Sans Regular'], 'text-size': 11 },
+    paint: { 'text-color': '#7dcfff' }
+  });
+  map.on('click', 'esa-clusters', async e => {
+    const f = e.features[0];
+    const zoom = await map.getSource('esa')
+      .getClusterExpansionZoom(f.properties.cluster_id);
+    map.easeTo({ center: f.geometry.coordinates, zoom: zoom + 0.5 });
+  });
+  map.on('mouseenter', 'esa-clusters', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'esa-clusters', () => map.getCanvas().style.cursor = '');
   map.on('click', 'esa', e => {
     const p = e.features[0].properties;
     new maplibregl.Popup({ offset: 12 })
@@ -832,6 +917,40 @@ const sheetToggle = () =>
   document.getElementById('panel').classList.toggle('expanded');
 document.getElementById('sheet-handle').onclick = sheetToggle;
 document.querySelector('#panel h1').onclick = sheetToggle;
+
+// collapsible panel sections, closed set remembered across reloads
+const secClosed = new Set(JSON.parse(localStorage.getItem('copSecClosed') || '[]'));
+document.querySelectorAll('.sec').forEach(sec => {
+  const arrow = () => sec.querySelector('.sec-a').textContent =
+    sec.classList.contains('closed') ? '▸' : '▾';
+  if (secClosed.has(sec.dataset.sec)) sec.classList.add('closed');
+  arrow();
+  sec.querySelector('.sec-h').onclick = () => {
+    sec.classList.toggle('closed');
+    secClosed[sec.classList.contains('closed') ? 'add' : 'delete'](sec.dataset.sec);
+    localStorage.setItem('copSecClosed', JSON.stringify([...secClosed]));
+    arrow();
+  };
+});
+
+// pin legend: render the actual canvas glyphs as inline images
+function iconURL(cat, fill, stroke) {
+  const c = document.createElement('canvas'); c.width = c.height = 30;
+  c.getContext('2d').putImageData(incidentIcon(cat, fill, stroke), 0, 0);
+  return c.toDataURL();
+}
+document.getElementById('pinleg').innerHTML =
+  ['crash', 'fire', 'burn', 'medical', 'rescue', 'hazmat', 'storm', 'other']
+    .map(cat => `<div class="pl"><img src="${iconURL(cat)}" alt="">` +
+      `${CAT[cat].label}</div>`).join('') +
+  `<div class="pl"><img src="${iconURL('fire', '#e0af68', '#c0caf5')}" alt="">` +
+    `nsw rfs — white ring, colour = alert level</div>` +
+  `<div class="plnote">◍ hollow ring = power outage · ` +
+    `⬤ orange circle = satellite hotspot (size = fire power)</div>`;
+document.getElementById('pinleg-h').onclick = () => {
+  const open = document.getElementById('pinleg').classList.toggle('open');
+  document.getElementById('pinleg-a').textContent = open ? '▾' : '▸';
+};
 
 // SITREP: serve.py bundles current feed state → local Ollama writes the
 // summary. Server caches 5 min; generation itself can take ~15-30 s.
@@ -1008,8 +1127,10 @@ document.getElementById('tog-ac').onchange = e =>
 document.getElementById('tog-radar').onchange = e =>
   map.getLayer('radar') &&
   map.setLayoutProperty('radar', 'visibility', e.target.checked ? 'visible' : 'none');
-document.getElementById('tog-esa').onchange = e =>
-  map.setLayoutProperty('esa', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-esa').onchange = e => {
+  for (const id of ['esa', 'esa-clusters', 'esa-cluster-count'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
 document.getElementById('tog-fires').onchange = e =>
   map.setLayoutProperty('fires', 'visibility', e.target.checked ? 'visible' : 'none');
 document.getElementById('tog-rfs').onchange = e =>

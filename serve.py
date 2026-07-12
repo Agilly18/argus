@@ -659,6 +659,11 @@ def tomtom_tile(z, x, y):
 
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            self.send_response(302)
+            self.send_header("Location", "/poc.html")
+            self.end_headers()
+            return
         m = re.fullmatch(r"/tomtom/(\d+)/(\d+)/(\d+)\.png", self.path)
         if m:
             if not TOMTOM_KEY:
