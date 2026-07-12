@@ -33,6 +33,16 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.ok { background: var(--green); } #dot.err { background: var(--red); }
 
+  #stress { cursor: pointer; }
+  #stress-bar { height: 4px; background: #ffffff10; border-radius: 2px;
+    margin: 3px 0 8px; overflow: hidden; }
+  #stress-bar i { display: block; height: 100%; width: 0;
+    background: var(--green); border-radius: 2px; transition: width .6s; }
+  #stress-parts { display: none; font-size: 12px; margin: -4px 0 8px;
+    padding: 4px 8px; border-left: 3px solid var(--dim);
+    background: #ffffff08; border-radius: 0 4px 4px 0; }
+  #stress-parts.open { display: block; }
+
   #addr-search { width: 100%; box-sizing: border-box; margin-bottom: 6px;
     background: #1a1b2680; border: 1px solid var(--dim); border-radius: 4px;
     color: var(--fg); font-family: monospace; font-size: 13px; padding: 6px 8px; }
@@ -114,6 +124,11 @@
 <div id="panel">
   <h1>CANBERRA COP</h1>
   <div class="sub">proof of concept · all-source</div>
+
+  <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
+    <span class="k">stress index</span><span id="stress-val">—</span></div>
+  <div id="stress-bar"><i id="stress-fill"></i></div>
+  <div id="stress-parts"></div>
 
   <input id="addr-search" type="text" placeholder="search address…" autocomplete="off">
   <div id="addr-results"></div>
@@ -211,7 +226,8 @@ function planeIcon(colour) {
   return g.getImageData(0, 0, 36, 36);
 }
 
-const state = { planes: [], radarFrame: null, esaFeats: [] };
+const state = { planes: [], radarFrame: null, esaFeats: [],
+  rfsFeats: [], firmsFeats: [], powerFeats: [], bomWarns: [], wx: null };
 
 // --- source freshness: every fetcher reports in; dots go green/amber/red ---
 // amber = last success older than 2.5× the poll interval; red = latest
@@ -348,7 +364,8 @@ function saveFeed() {
   localStorage.setItem('copFeedKnown', JSON.stringify(feedState.known));
 }
 const FEED_KIND = { new: ['NEW', 'var(--green)'], update: ['UPD', 'var(--amber)'],
-  cleared: ['CLR', 'var(--dim)'], loiter: ['AIR', 'var(--red)'] };
+  cleared: ['CLR', 'var(--dim)'], loiter: ['AIR', 'var(--red)'],
+  corr: ['CORR', '#bb9af7'] };
 function renderFeed() {
   const ago = t => { const m = Math.round((Date.now() - t) / 60000);
     return m < 1 ? 'now' : m < 60 ? m + 'm ago' : Math.round(m / 60) + 'h ago'; };
@@ -419,6 +436,141 @@ function detectLoiter() {
   }
 }
 
+// --- Canberra Stress Index: one number for "how lively is the city" ---
+// Each contributor is capped so no single stream can pin the needle; the
+// weights are editorial, tuned for "quiet Tuesday ≈ 0-15, bad day ≥ 45".
+function computeStress() {
+  const parts = [];
+  const add = (label, v, cap) => {
+    const s = Math.min(cap, Math.round(v));
+    if (s > 0) parts.push([label, s]);
+  };
+  // ambulance callouts are the city's background hum (ESA always carries
+  // 10-20) — only above-normal load scores, everything else is linear
+  const catW = { fire: 8, hazmat: 8, rescue: 6, crash: 5, storm: 5,
+    burn: 1, other: 2 };
+  let act = 0, med = 0;
+  state.esaFeats.forEach(f => {
+    if (f.properties.cat === 'medical') med++;
+    else act += catW[f.properties.cat] || 2;
+  });
+  act += Math.max(0, med - 12) * 2;
+  add('ACT incidents', act, 40);
+  const rfsW = { 'Emergency Warning': 25, 'Watch and Act': 15, 'Advice': 5 };
+  add('NSW fire alerts',
+    state.rfsFeats.reduce((t, f) => t + (rfsW[f.properties.category] || 2), 0), 30);
+  const live = state.powerFeats.filter(f => f.properties.sev === 'unplanned');
+  add('power outages',
+    live.reduce((t, f) => t + 4 + (+f.properties.customers || 0) / 500, 0), 20);
+  const bomW = { major: 20, moderate: 10, minor: 4 };
+  add('BOM warnings',
+    state.bomWarns.reduce((t, w) => t + (bomW[w.severity] || 4), 0), 25);
+  let wx = 0;
+  if (state.wx) {
+    if (state.wx.gust >= 90) wx += 15; else if (state.wx.gust >= 60) wx += 8;
+    if (state.wx.temp >= 38) wx += 8; else if (state.wx.temp <= 0) wx += 4;
+    if (state.wx.precip >= 5) wx += 5;
+  }
+  add('weather', wx, 20);
+  const cut = Date.now() - 30 * 60e3;
+  add('recent alerts', feedState.events.filter(e =>
+    e.t > cut && (e.kind === 'loiter' || e.kind === 'corr')).length * 5, 10);
+  return { total: Math.min(100, parts.reduce((t, p) => t + p[1], 0)), parts };
+}
+const STRESS_LVL = [ // [floor, label, colour]
+  [70, 'HIGH', 'var(--red)'], [45, 'ELEVATED', 'var(--amber)'],
+  [20, 'GUARDED', 'var(--cyan)'], [0, 'LOW', 'var(--green)']
+];
+function renderStress() {
+  const { total, parts } = computeStress();
+  const [, label, col] = STRESS_LVL.find(l => total >= l[0]);
+  const val = document.getElementById('stress-val');
+  val.textContent = `${total} ${label}`;
+  val.style.color = col;
+  const bar = document.getElementById('stress-fill');
+  bar.style.width = total + '%';
+  bar.style.background = col;
+  document.getElementById('stress-parts').innerHTML = parts.length
+    ? parts.map(([n, v]) => `<div class="row"><span class="k">${n}</span>` +
+        `<span>+${v}</span></div>`).join('')
+    : '<span class="k">nothing scoring — quiet out there</span>';
+}
+
+// --- cross-stream correlation: two sources reporting the same place ---
+// Each pass re-derives active pairs from current layer state; a pair emits
+// one CORR feed entry (6 h debounce per pairing, persisted) and a dashed
+// link line on the map for as long as both sides stay active.
+const corrState = {
+  seen: JSON.parse(localStorage.getItem('copCorrSeen') || '{}')
+};
+function corrRecords() {
+  // normalise each stream to {id, lat, lon, ...} for the pair rules
+  const pt = f => ({ lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] });
+  const now = Date.now();
+  return {
+    esa: state.esaFeats.map(f => ({ ...pt(f), id: f.properties.guid,
+      title: f.properties.title, cat: f.properties.cat })),
+    rfs: state.rfsFeats.map(f => ({ ...pt(f), id: f.properties.title,
+      title: f.properties.title, category: f.properties.category })),
+    // FIRMS is a 48 h window; only hotspots seen in the last 12 h correlate
+    firms: state.firmsFeats.map(f => {
+      const p = f.properties;
+      const ts = Date.parse(`${p.date}T${p.time.slice(0, 2)}:${p.time.slice(2)}:00Z`);
+      return { ...pt(f), id: p.date + p.time + '@' +
+        f.geometry.coordinates.map(c => c.toFixed(3)).join(','),
+        sat: p.satellite, frp: p.frp, ts };
+    }).filter(h => now - h.ts < 12 * 3600e3),
+    power: state.powerFeats.map(f => ({ ...pt(f), id: String(f.properties.id),
+      sev: f.properties.sev, customers: f.properties.customers }))
+  };
+}
+function correlate() {
+  const s = corrRecords();
+  const now = Date.now();
+  const lines = [];
+  const emit = (rule, a, b, d, ev) => {
+    lines.push({ type: 'Feature', geometry: { type: 'LineString',
+      coordinates: [[a.lon, a.lat], [b.lon, b.lat]] } });
+    const key = `${rule}|${a.id}|${b.id}`;
+    if (corrState.seen[key] && now - corrState.seen[key] < 6 * 3600e3) return;
+    corrState.seen[key] = now;
+    feedEvent('corr', ev.src, { ...ev,
+      lon: (a.lon + b.lon) / 2, lat: (a.lat + b.lat) / 2,
+      detail: (ev.detail ? ev.detail + ' · ' : '') + d.toFixed(1) + ' km apart' });
+  };
+  const pairUp = (rule, la, lb, km, mk) => {
+    for (const a of la) for (const b of lb) {
+      const d = kmDist(a.lat, a.lon, b.lat, b.lon);
+      if (d <= km) emit(rule, a, b, d, mk(a, b));
+    }
+  };
+  // satellite hotspot lands on a dispatched fire/burn → confirmed from orbit
+  pairUp('esa-firms', s.esa.filter(e => e.cat === 'fire' || e.cat === 'burn'),
+    s.firms, 3, (e, h) => ({ src: 'ESA+FIRMS', cat: e.cat,
+      title: `satellite confirms: ${e.title}`,
+      detail: `${h.sat} hotspot · ${h.frp} MW` }));
+  // same fire tracked by both ACT ESA and NSW RFS → border incident
+  pairUp('esa-rfs', s.esa, s.rfs, 5, (e, r) => ({ src: 'ESA+RFS', cat: e.cat,
+    title: `ACT + NSW tracking: ${e.title}`, detail: `RFS: ${r.title}` }));
+  // hotspot on an RFS fire that ESA isn't carrying
+  pairUp('rfs-firms', s.rfs, s.firms, 3, (r, h) => ({ src: 'RFS+FIRMS',
+    cat: 'fire', title: `satellite confirms: ${r.title}`,
+    detail: `${h.sat} hotspot · ${h.frp} MW` }));
+  // unplanned outage next to a crash/storm/fire → probable cause found
+  pairUp('power-esa', s.power.filter(p => p.sev === 'unplanned'),
+    s.esa.filter(e => ['crash', 'storm', 'fire'].includes(e.cat)), 1.5,
+    (p, e) => ({ src: 'power+ESA', cat: 'power',
+      title: `outage co-located: ${e.title}`,
+      detail: `${p.customers ?? '?'} customers off` }));
+  // prune stale debounce keys, persist
+  for (const [k, t] of Object.entries(corrState.seen))
+    if (now - t > 24 * 3600e3) delete corrState.seen[k];
+  localStorage.setItem('copCorrSeen', JSON.stringify(corrState.seen));
+  const src = map.getSource('corr');
+  if (src) src.setData({ type: 'FeatureCollection', features: lines });
+  renderStress();
+}
+
 map.on('load', () => {
   map.addImage('plane-lo',  planeIcon('#e0af68'));
   map.addImage('plane-hi',  planeIcon('#7dcfff'));
@@ -456,6 +608,16 @@ map.on('load', () => {
   });
   map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
+
+  // correlation link lines: dashed purple threads joining two sources that
+  // agree; sits under the incident pins
+  map.addSource('corr', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'corr-lines', type: 'line', source: 'corr',
+    paint: { 'line-color': '#bb9af7', 'line-width': 1.6,
+      'line-opacity': 0.7, 'line-dasharray': [2, 2] }
+  });
 
   map.addSource('esa', { type: 'geojson',
     data: { type: 'FeatureCollection', features: [] } });
@@ -623,7 +785,11 @@ map.on('load', () => {
   fetchBom();       setInterval(fetchBom, 5 * 60000);
   renderFeed();     setInterval(renderFeed, 60000); // keep the ages fresh
   renderHealth();
+  renderStress();   setInterval(renderStress, 60000); // decay 'recent alerts'
 });
+
+document.getElementById('stress').onclick = () =>
+  document.getElementById('stress-parts').classList.toggle('open');
 
 // SITREP: serve.py bundles current feed state → local Ollama writes the
 // summary. Server caches 5 min; generation itself can take ~15-30 s.
@@ -732,6 +898,9 @@ async function fetchWeather() {
     document.getElementById('wx-cond').textContent =
       `${WMO[c.weather_code] || 'code ' + c.weather_code}` +
       (c.precipitation > 0 ? `, ${c.precipitation} mm` : '');
+    state.wx = { temp: c.temperature_2m, gust: c.wind_gusts_10m,
+      precip: c.precipitation };
+    renderStress();
     mark('wx', true);
   } catch (e) {
     document.getElementById('wx-cond').textContent = 'wx error';
@@ -777,6 +946,7 @@ async function fetchIncidents() {
       status: f.properties.status, cat: f.properties.cat,
       detail: f.properties.suburb,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    correlate();
     mark('esa', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -856,6 +1026,8 @@ async function fetchFires() {
     const geo = await r.json();
     map.getSource('fires').setData(geo);
     count.textContent = `(${geo.features.length})`;
+    state.firmsFeats = geo.features;
+    correlate();
     mark('firms', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -896,11 +1068,13 @@ async function fetchRfs() {
         f.geometry.coordinates[1] > -36.5 && f.geometry.coordinates[1] < -34.2);
     map.getSource('rfs').setData({ type: 'FeatureCollection', features: feats });
     count.textContent = `(${feats.length})`;
+    state.rfsFeats = feats;
     feedDiff('NSW RFS', feats.map(f => ({
       id: f.properties.title, title: f.properties.title,
       status: f.properties.status, cat: 'fire',
       detail: f.properties.category,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    correlate();
     mark('rfs', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -928,6 +1102,8 @@ async function fetchPower() {
         status: f.properties.sev + '|' + (f.properties.eta || ''),
         cat: 'power', detail: `${f.properties.customers ?? '?'} customers`,
         lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
+    state.powerFeats = pins;
+    correlate();
     mark('power', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -959,6 +1135,8 @@ async function fetchBom() {
     // severity order so the worst sits on top
     const rank = { major: 0, moderate: 1, minor: 2 };
     warns.sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3));
+    state.bomWarns = warns;
+    renderStress();
     box.className = warns.length ? 'has-warn' : '';
     box.innerHTML = warns.map(w => {
       const t = w.expires ? new Date(w.expires) : null;
