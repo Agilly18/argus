@@ -110,6 +110,22 @@
 
   #stress-spark { opacity: .85; align-self: center; }
 
+  #zone-name, #zone-km { background: #1a1b2680; border: 1px solid var(--dim);
+    border-radius: 4px; color: var(--fg); font-family: monospace;
+    font-size: 12px; padding: 4px 6px; box-sizing: border-box; }
+  #zone-name:focus, #zone-km:focus { outline: none; border-color: var(--cyan); }
+  #zone-add { background: #1a1b2680; border: 1px solid var(--dim);
+    border-radius: 4px; color: var(--cyan); font-family: monospace;
+    font-size: 12px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
+  #zone-add:hover { border-color: var(--cyan); }
+  #zone-add:disabled { color: var(--amber); cursor: crosshair; }
+  #zonelist .zn { cursor: pointer; padding: 2px 4px; border-radius: 4px;
+    font-size: 12px; }
+  #zonelist .zn:hover { background: #414868; }
+  #zonelist .zn-x { color: var(--dim); cursor: pointer; padding: 0 5px; }
+  #zonelist .zn-x:hover { color: var(--red); }
+  .fe.fe-zone { background: #7dcfff14; }
+
   #feed-filter { cursor: pointer; color: var(--dim); }
   #feed-filter:hover { color: var(--fg); }
   #feed-filter.sig { color: var(--cyan); }
@@ -185,6 +201,7 @@
       </div>
       <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
+      <label><input type="checkbox" id="tog-wind"> wind field</label>
       <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
@@ -196,6 +213,19 @@
         <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
       <div id="pinleg"></div>
       <div id="aclist"></div>
+    </div>
+  </div>
+  <hr>
+  <div class="sec" data-sec="zones">
+    <div class="row sec-h"><span class="k">watch zones</span><span class="k sec-a">▾</span></div>
+    <div class="sec-b">
+      <div id="zonelist"></div>
+      <div class="row" style="gap:6px; margin-top:4px">
+        <input id="zone-name" placeholder="name" autocomplete="off" style="flex:1; min-width:0">
+        <input id="zone-km" type="number" value="2" min="0.5" step="0.5" title="radius, km" style="width:56px">
+        <button id="zone-add">+ place</button>
+      </div>
+      <label><input type="checkbox" id="tog-notify"> desktop alerts <span id="notify-note" class="k"></span></label>
     </div>
   </div>
   <hr>
@@ -285,7 +315,7 @@ const HEALTH = {
   air: { iv: 12e3 }, radar: { iv: 300e3 }, wx: { iv: 600e3 },
   esa: { iv: 60e3 }, firms: { iv: 600e3 }, rfs: { iv: 60e3 },
   power: { iv: 120e3 }, transit: { iv: 15e3 }, news: { iv: 600e3 },
-  bom: { iv: 300e3 }
+  bom: { iv: 300e3 }, wind: { iv: 1800e3 }
 };
 function mark(src, ok) {
   const h = HEALTH[src]; if (!h) return;
@@ -381,6 +411,90 @@ function incidentIcon(cat, fill, stroke = '#1a1b26') {
   return g.getImageData(0, 0, 30, 30);
 }
 
+// --- watch zones: named circles; events inside get boosted + tagged ---
+let zones = JSON.parse(localStorage.getItem('copZones') || '[]');
+function circlePoly(lon, lat, km) {
+  const pts = [];
+  for (let i = 0; i <= 48; i++) {
+    const a = i / 48 * 2 * Math.PI;
+    pts.push([lon + km / (111.32 * Math.cos(lat * Math.PI / 180)) * Math.cos(a),
+      lat + km / 110.57 * Math.sin(a)]);
+  }
+  return pts;
+}
+function zoneOf(lon, lat) {
+  const z = zones.find(w => kmDist(lat, lon, w.lat, w.lon) <= w.km);
+  return z ? z.name : null;
+}
+function saveZones() {
+  localStorage.setItem('copZones', JSON.stringify(zones));
+  renderZones();
+}
+function renderZones() {
+  const src = map.getSource('zones');
+  if (src) src.setData({ type: 'FeatureCollection', features: zones.flatMap(w => [
+    { type: 'Feature', properties: {},
+      geometry: { type: 'Polygon', coordinates: [circlePoly(w.lon, w.lat, w.km)] } },
+    { type: 'Feature', properties: { name: w.name },
+      geometry: { type: 'Point', coordinates: [w.lon, w.lat] } }
+  ]) });
+  document.getElementById('zonelist').innerHTML = zones.map((w, i) =>
+    `<div class="zn row" data-i="${i}"><span>⌂ ${w.name}
+      <span class="k">(${w.km} km)</span></span>
+      <span class="zn-x" data-i="${i}" title="remove">×</span></div>`).join('') ||
+    '<span class="k" style="font-size:11px">no zones — name one, set a radius, place it</span>';
+  document.querySelectorAll('#zonelist .zn').forEach(el => el.onclick = () => {
+    const w = zones[+el.dataset.i];
+    map.flyTo({ center: [w.lon, w.lat], zoom: 12.5 });
+  });
+  document.querySelectorAll('#zonelist .zn-x').forEach(el => el.onclick = e => {
+    e.stopPropagation();
+    zones.splice(+el.dataset.i, 1);
+    saveZones(); renderStress();
+  });
+}
+document.getElementById('zone-add').onclick = () => {
+  const btn = document.getElementById('zone-add');
+  btn.textContent = 'click map…'; btn.disabled = true;
+  map.once('click', e => {
+    const name = document.getElementById('zone-name').value.trim() ||
+      'zone ' + (zones.length + 1);
+    const km = Math.max(0.5, +document.getElementById('zone-km').value || 2);
+    zones.push({ name, km, lon: +e.lngLat.lng.toFixed(5),
+      lat: +e.lngLat.lat.toFixed(5) });
+    document.getElementById('zone-name').value = '';
+    saveZones(); renderStress();
+    btn.textContent = '+ place'; btn.disabled = false;
+  });
+};
+
+// --- desktop notifications: needs a secure context (https or localhost),
+// so plain http://cop.lan degrades to a note until the tunnel exists ---
+let notifyOn = localStorage.getItem('copNotify') === '1';
+function notify(title, body) {
+  if (!notifyOn || typeof Notification === 'undefined' ||
+      Notification.permission !== 'granted') return;
+  try { new Notification(title, { body, tag: title + '|' + body }); } catch (e) {}
+}
+{
+  const box = document.getElementById('tog-notify');
+  if (typeof Notification === 'undefined') {
+    box.disabled = true;
+    document.getElementById('notify-note').textContent = '(needs https)';
+  } else {
+    box.checked = notifyOn && Notification.permission === 'granted';
+    box.onchange = async e => {
+      if (e.target.checked) {
+        if (await Notification.requestPermission() !== 'granted') {
+          e.target.checked = false; return;
+        }
+        notifyOn = true;
+      } else notifyOn = false;
+      localStorage.setItem('copNotify', notifyOn ? '1' : '0');
+    };
+  }
+}
+
 // --- event feed: diff each poll against known state, log what changed ---
 const feedState = {
   events: JSON.parse(localStorage.getItem('copFeedEvents') || '[]'),
@@ -403,10 +517,18 @@ function feedDiff(src, items) {
   saveFeed();
 }
 function feedEvent(kind, src, i, note) {
+  const zone = i.lon != null ? zoneOf(i.lon, i.lat) : null;
   feedState.events.unshift({ t: Date.now(), kind, src, cat: i.cat,
-    title: i.title, detail: note || i.detail || '', lon: i.lon, lat: i.lat });
+    title: i.title, detail: note || i.detail || '', lon: i.lon, lat: i.lat, zone });
   feedState.events = feedState.events.slice(0, 100);
   renderFeed();
+  // notification-worthy: alerts, anything in a watch zone, emergency-level
+  // fire warnings, major BOM warnings, stress level changes
+  if (kind === 'loiter' || kind === 'corr' || kind === 'level' || zone ||
+      (i.detail || '').includes('Emergency Warning') ||
+      (src === 'BOM' && i.detail === 'major'))
+    notify(`COP ${(FEED_KIND[kind] || ['?'])[0]}: ${i.title}`,
+      (zone ? '⌂ ' + zone + ' · ' : '') + (note || i.detail || src));
 }
 function saveFeed() {
   localStorage.setItem('copFeedEvents', JSON.stringify(feedState.events));
@@ -414,7 +536,7 @@ function saveFeed() {
 }
 const FEED_KIND = { new: ['NEW', 'var(--green)'], update: ['UPD', 'var(--amber)'],
   cleared: ['CLR', 'var(--dim)'], loiter: ['AIR', 'var(--red)'],
-  corr: ['CORR', '#bb9af7'] };
+  corr: ['CORR', '#bb9af7'], level: ['LVL', 'var(--cyan)'] };
 // display-only noise filter: significant mode hides the routine ambulance /
 // planned-burn churn; loiter + corr always show. Events are recorded either way.
 const feedFilter = { sig: localStorage.getItem('copFeedSig') === '1' };
@@ -429,11 +551,12 @@ function renderFeed() {
     .map((e, n) => {
       const c = CAT[e.cat] || CAT.other;
       const [k, kc] = FEED_KIND[e.kind] || ['?', 'var(--dim)'];
-      return `<div class="fe ${Date.now() - e.t < 20000 ? 'fresh' : ''}"
+      return `<div class="fe ${Date.now() - e.t < 20000 ? 'fresh' : ''}
+        ${e.zone ? 'fe-zone' : ''}"
         style="border-left-color:${c.col}" data-n="${n}">
         <span>${c.emoji}</span><div>
         <span class="fe-k" style="color:${kc}">${k}</span> ${e.title}<br>
-        <span class="fe-m">${e.src}${e.detail ? ' · ' + e.detail : ''} · ${ago(e.t)}</span>
+        <span class="fe-m">${e.zone ? '⌂ ' + e.zone + ' · ' : ''}${e.src}${e.detail ? ' · ' + e.detail : ''} · ${ago(e.t)}</span>
         </div></div>`;
     }).join('');
   const hidden = feedState.events.length - shown.length;
@@ -541,6 +664,16 @@ function computeStress() {
   const cut = Date.now() - 30 * 60e3;
   add('recent alerts', feedState.events.filter(e =>
     e.t > cut && (e.kind === 'loiter' || e.kind === 'corr')).length * 5, 10);
+  // anything live inside a watch zone matters more — it's near somewhere named
+  if (zones.length) {
+    const inz = f => zoneOf(f.geometry.coordinates[0], f.geometry.coordinates[1]);
+    let z = 0;
+    state.esaFeats.forEach(f => { if (inz(f)) z += 3; });
+    state.rfsFeats.forEach(f => { if (inz(f)) z += 4; });
+    state.powerFeats.filter(f => f.properties.sev === 'unplanned')
+      .forEach(f => { if (inz(f)) z += 3; });
+    add('watch zones', z, 15);
+  }
   return { total: Math.min(100, parts.reduce((t, p) => t + p[1], 0)), parts };
 }
 const STRESS_LVL = [ // [floor, label, colour]
@@ -571,9 +704,24 @@ function stressSpark(total) {
   });
   g.stroke();
 }
+// level changes get a feed entry + a fresh SITREP, after a 2 min settle
+// (sources load staggered on page open) and with a 10 min cooldown
+const stressAuto = { t0: Date.now(), level: null, last: 0 };
 function renderStress() {
   const { total, parts } = computeStress();
   const [, label, col] = STRESS_LVL.find(l => total >= l[0]);
+  const now = Date.now();
+  if (now - stressAuto.t0 > 120e3) {
+    if (stressAuto.level && label !== stressAuto.level &&
+        now - stressAuto.last > 600e3) {
+      stressAuto.last = now;
+      feedEvent('level', 'stress index',
+        { title: `stress ${stressAuto.level} → ${label} (${total})`, cat: 'other' });
+      saveFeed();
+      loadSitrep().catch(() => {});
+    }
+    stressAuto.level = label;
+  }
   stressSpark(total);
   const val = document.getElementById('stress-val');
   val.textContent = `${total} ${label}`;
@@ -700,6 +848,31 @@ map.on('load', () => {
   map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
 
+  // watch zones: faint cyan circles + name labels, under everything else
+  map.addSource('zones', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'zones-fill', type: 'fill', source: 'zones',
+    filter: ['==', ['geometry-type'], 'Polygon'],
+    paint: { 'fill-color': '#7dcfff', 'fill-opacity': 0.05 }
+  });
+  map.addLayer({
+    id: 'zones-line', type: 'line', source: 'zones',
+    filter: ['==', ['geometry-type'], 'Polygon'],
+    paint: { 'line-color': '#7dcfff', 'line-width': 1.2,
+      'line-opacity': 0.5, 'line-dasharray': [3, 3] }
+  });
+  map.addLayer({
+    id: 'zones-label', type: 'symbol', source: 'zones',
+    filter: ['==', ['geometry-type'], 'Point'],
+    layout: { 'text-field': ['get', 'name'],
+      'text-font': ['Open Sans Regular'], 'text-size': 10,
+      'text-offset': [0, 1.1] },
+    paint: { 'text-color': '#7dcfff', 'text-opacity': 0.7,
+      'text-halo-color': '#1a1b26', 'text-halo-width': 1.2 }
+  });
+  renderZones();
+
   // correlation link lines: dashed purple threads joining two sources that
   // agree; sits under the incident pins
   map.addSource('corr', { type: 'geojson',
@@ -709,6 +882,31 @@ map.on('load', () => {
     paint: { 'line-color': '#bb9af7', 'line-width': 1.6,
       'line-opacity': 0.7, 'line-dasharray': [2, 2] }
   });
+
+  // wind field: arrows point where the wind is blowing TO, coloured by
+  // speed band; default off, fetched lazily on first toggle
+  map.addImage('wind-0', windIcon('#565f89'));
+  map.addImage('wind-1', windIcon('#7dcfff'));
+  map.addImage('wind-2', windIcon('#e0af68'));
+  map.addImage('wind-3', windIcon('#f7768e'));
+  map.addSource('wind', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'wind', type: 'symbol', source: 'wind',
+    layout: { 'icon-image': ['get', 'icon'], 'icon-rotate': ['get', 'rot'],
+      'icon-allow-overlap': true, 'icon-rotation-alignment': 'map',
+      visibility: 'none' }
+  });
+  map.on('click', 'wind', e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 12 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>wind</b><br>speed: ${p.speed} km/h (g ${p.gust})<br>
+        from: ${p.dir}°`)
+      .addTo(map);
+  });
+  map.on('mouseenter', 'wind', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'wind', () => map.getCanvas().style.cursor = '');
 
   // ESA pins cluster at low zoom (the inner-city ambulance blob is unreadable
   // otherwise); zoom past clusterMaxZoom and the taxonomy glyphs return
@@ -954,6 +1152,18 @@ document.getElementById('pinleg-h').onclick = () => {
 
 // SITREP: serve.py bundles current feed state → local Ollama writes the
 // summary. Server caches 5 min; generation itself can take ~15-30 s.
+// Shared by the button and the stress-level auto-refresh.
+async function loadSitrep() {
+  const r = await fetch('sitrep');
+  if (!r.ok) throw new Error(r.status);
+  const d = await r.json();
+  const box = document.getElementById('sitrep-box');
+  const age = Math.round((Date.now() / 1000 - d.generated) / 60);
+  box.innerHTML = d.text.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+    `<span class="sm">${d.model} · generated ${age < 1 ? 'just now'
+      : age + ' min ago'}</span>`;
+  box.style.display = 'block';
+}
 document.getElementById('sitrep-btn').onclick = async () => {
   const btn = document.getElementById('sitrep-btn');
   const box = document.getElementById('sitrep-box');
@@ -962,14 +1172,7 @@ document.getElementById('sitrep-btn').onclick = async () => {
   }
   btn.disabled = true; btn.textContent = '◆ generating…';
   try {
-    const r = await fetch('sitrep');
-    if (!r.ok) throw new Error(r.status);
-    const d = await r.json();
-    const age = Math.round((Date.now() / 1000 - d.generated) / 60);
-    box.innerHTML = d.text.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
-      `<span class="sm">${d.model} · generated ${age < 1 ? 'just now'
-        : age + ' min ago'}</span>`;
-    box.style.display = 'block';
+    await loadSitrep();
   } catch (e) {
     box.innerHTML = 'SITREP unavailable (needs serve.py + Ollama reachable)';
     box.style.display = 'block';
@@ -1044,6 +1247,55 @@ async function fetchRadar() {
     mark('radar', true);
   } catch (e) { mark('radar', false); /* decorative; fail quietly */ }
 }
+
+// wind arrow, pointing north = blowing toward the top; rotated per-feature
+function windIcon(colour) {
+  const c = document.createElement('canvas'); c.width = c.height = 26;
+  const g = c.getContext('2d');
+  g.translate(13, 13); g.strokeStyle = colour; g.fillStyle = colour;
+  g.lineWidth = 2;
+  g.beginPath(); g.moveTo(0, 9); g.lineTo(0, -4); g.stroke();
+  g.beginPath(); g.moveTo(0, -10); g.lineTo(4.5, -3); g.lineTo(-4.5, -3);
+  g.closePath(); g.fill();
+  return g.getImageData(0, 0, 26, 26);
+}
+// 5×5 grid over the ACT + surrounds; one multi-location Open-Meteo call
+const WIND_GRID = (() => {
+  const lats = [], lons = [];
+  for (const la of [-34.95, -35.2, -35.45, -35.7, -35.95])
+    for (const lo of [148.65, 148.95, 149.25, 149.55, 149.85]) {
+      lats.push(la); lons.push(lo);
+    }
+  return { lats, lons };
+})();
+async function fetchWind() {
+  try {
+    const r = await fetch('https://api.open-meteo.com/v1/forecast' +
+      `?latitude=${WIND_GRID.lats.join(',')}&longitude=${WIND_GRID.lons.join(',')}` +
+      '&current=wind_speed_10m,wind_direction_10m,wind_gusts_10m');
+    const arr = await r.json();
+    const feats = (Array.isArray(arr) ? arr : [arr]).map(p => {
+      const c = p.current, s = c.wind_speed_10m;
+      return { type: 'Feature',
+        geometry: { type: 'Point', coordinates: [p.longitude, p.latitude] },
+        properties: { speed: s, gust: c.wind_gusts_10m,
+          dir: c.wind_direction_10m,
+          rot: (c.wind_direction_10m + 180) % 360,
+          icon: 'wind-' + (s >= 60 ? 3 : s >= 40 ? 2 : s >= 20 ? 1 : 0) } };
+    });
+    map.getSource('wind').setData({ type: 'FeatureCollection', features: feats });
+    mark('wind', true);
+  } catch (e) { mark('wind', false); }
+}
+let windStarted = false;
+document.getElementById('tog-wind').onchange = e => {
+  if (e.target.checked && !windStarted) {
+    windStarted = true;
+    fetchWind(); setInterval(fetchWind, 30 * 60000);
+  }
+  map.setLayoutProperty('wind', 'visibility',
+    e.target.checked ? 'visible' : 'none');
+};
 
 async function fetchWeather() {
   try {
@@ -1300,6 +1552,11 @@ async function fetchBom() {
     warns.sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3));
     state.bomWarns = warns;
     renderStress();
+    // new / severity-changed warnings become feed entries (no geometry,
+    // so the entries don't fly-to on click)
+    feedDiff('BOM', warns.map(w => ({ id: String(w.id),
+      title: w.short || w.title, status: w.severity || '?',
+      cat: categorise(w.title), detail: w.severity || '' })));
     box.className = warns.length ? 'has-warn' : '';
     box.innerHTML = warns.map(w => {
       const t = w.expires ? new Date(w.expires) : null;
