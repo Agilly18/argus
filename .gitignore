@@ -1,2 +1,7 @@
 .env
 __pycache__/
+# time-slider snapshot store (dev writes it here; prod uses the ./data volume)
+history.db
+history.db-wal
+history.db-shm
+data/

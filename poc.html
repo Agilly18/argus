@@ -15,6 +15,23 @@
     font-family: monospace; color: var(--fg); }
   #map { position: absolute; inset: 0; }
 
+  /* time slider — sits along the bottom, clear of the left panel */
+  #timebar { position: absolute; z-index: 6; bottom: 12px; left: 360px;
+    right: 12px; display: flex; align-items: center; gap: 10px;
+    padding: 7px 12px; font-size: 12px;
+    background: var(--panel); border: 1px solid var(--dim); border-radius: 8px; }
+  #timebar.replay { border-color: var(--amber); }
+  #tb-live { font-family: monospace; font-size: 11px; cursor: pointer;
+    padding: 3px 8px; border-radius: 4px; white-space: nowrap;
+    background: var(--green); color: var(--bg); border: none; }
+  #timebar.replay #tb-live { background: var(--amber); }
+  #tb-slider { flex: 1; accent-color: var(--cyan); min-width: 80px; }
+  #timebar.replay #tb-slider { accent-color: var(--amber); }
+  #tb-label { color: var(--dim); white-space: nowrap; min-width: 116px;
+    text-align: right; }
+  #timebar.replay #tb-label { color: var(--amber); }
+  @media (max-width: 700px) { #timebar { left: 12px; bottom: 168px; } }
+
   #panel { position: absolute; z-index: 5; top: 12px; left: 12px; width: 320px;
     max-height: calc(100vh - 24px); overflow-y: auto;
     background: var(--panel); border: 1px solid var(--dim); border-radius: 8px;
@@ -253,8 +270,18 @@
   <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
 </div>
 
+<div id="timebar" class="live">
+  <button id="tb-live" title="jump to live">● LIVE</button>
+  <input id="tb-slider" type="range" min="0" max="1" step="30" value="1" disabled>
+  <span id="tb-label">recording…</span>
+</div>
+
 <script>
 const CBR = { lat: -35.28, lon: 149.13, radiusNm: 60 };
+// Time slider: null = live. When set to an epoch (seconds), incident layers
+// pull their state from /history at that moment instead of the live feed.
+let REPLAY = null;
+const feedURL = s => REPLAY ? `history/${s}?at=${REPLAY}` : s;
 const WMO = { 0:'clear', 1:'mostly clear', 2:'partly cloudy', 3:'overcast',
   45:'fog', 48:'rime fog', 51:'drizzle', 53:'drizzle', 55:'drizzle',
   61:'light rain', 63:'rain', 65:'heavy rain', 71:'light snow', 73:'snow',
@@ -682,6 +709,9 @@ const feedState = {
   loiterSeen: {}
 };
 function feedDiff(src, items) {
+  // In replay the layers show a past snapshot; diffing it against live state
+  // would spew bogus NEW/CLR events, so hold the event feed frozen.
+  if (REPLAY) return;
   const prev = feedState.known[src];
   const cur = {};
   items.forEach(i => cur[i.id] = i);
@@ -1491,7 +1521,89 @@ map.on('load', () => {
   renderFeed();     setInterval(renderFeed, 60000); // keep the ages fresh
   renderHealth();
   renderStress();   setInterval(renderStress, 60000); // decay 'recent alerts'
+  initTimebar();
 });
+
+// --- time slider ------------------------------------------------------------
+// Scrub the incident layers back through recorded history. Live-only layers
+// (aircraft, transit, radar, wind) freeze; the seven incident layers repaint
+// from /history at the chosen moment.
+const INCIDENT_FETCHERS = [fetchIncidents, fetchFires, fetchRfs, fetchPower,
+                           fetchAirq, fetchClosures, fetchQuakes];
+const tb = { min: 0, max: 0 };
+let tbPaintTimer = null;
+
+const tbFmt = t => new Date(t * 1000).toLocaleString([],
+  { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+function paintIncidents() { INCIDENT_FETCHERS.forEach(fn => fn()); }
+
+function clearLiveLayers() {
+  ['aircraft', 'transit', 'trails'].forEach(s => {
+    const src = map.getSource(s);
+    if (src) src.setData({ type: 'FeatureCollection', features: [] });
+  });
+}
+
+// keep radar/wind hidden in replay; restore to their toggle state when live
+function setLiveRastersVisible(vis) {
+  [['radar', 'tog-radar'], ['wind', 'tog-wind']].forEach(([lyr, tog]) => {
+    if (!map.getLayer(lyr)) return;
+    const on = vis && document.getElementById(tog).checked;
+    map.setLayoutProperty(lyr, 'visibility', on ? 'visible' : 'none');
+  });
+}
+
+function enterReplay(t) {
+  const wasLive = !REPLAY;
+  REPLAY = t;
+  const bar = document.getElementById('timebar');
+  bar.classList.add('replay'); bar.classList.remove('live');
+  document.getElementById('tb-slider').value = t;
+  document.getElementById('tb-label').textContent = 'REPLAY ' + tbFmt(t);
+  document.getElementById('tb-live').textContent = '▶ GO LIVE';
+  if (wasLive) { clearLiveLayers(); setLiveRastersVisible(false); }
+  clearTimeout(tbPaintTimer);           // debounce repaint while dragging
+  tbPaintTimer = setTimeout(paintIncidents, 150);
+}
+
+function goLive() {
+  const wasReplay = !!REPLAY;
+  REPLAY = null;
+  const bar = document.getElementById('timebar');
+  bar.classList.remove('replay'); bar.classList.add('live');
+  document.getElementById('tb-slider').value = tb.max;
+  document.getElementById('tb-label').textContent = 'live';
+  document.getElementById('tb-live').textContent = '● LIVE';
+  if (wasReplay) {
+    setLiveRastersVisible(true);
+    paintIncidents(); fetchAircraft(); fetchTransit(); fetchWind();
+  }
+}
+
+async function refreshRange() {
+  try {
+    const d = await (await fetch('history/range')).json();
+    const label = document.getElementById('tb-label');
+    const slider = document.getElementById('tb-slider');
+    if (d.min == null) { label.textContent = 'recording…'; return; }
+    tb.min = d.min; tb.max = d.now;
+    slider.min = d.min; slider.max = d.now; slider.disabled = false;
+    if (!REPLAY) { slider.value = d.now; label.textContent = 'live'; }
+  } catch (e) { /* leave the bar as-is */ }
+}
+
+function initTimebar() {
+  const slider = document.getElementById('tb-slider');
+  slider.oninput = () => {
+    const v = +slider.value;
+    if (v >= tb.max - 30) goLive();       // snapped to the live edge
+    else enterReplay(v);
+  };
+  document.getElementById('tb-live').onclick = goLive;
+  refreshRange();
+  setInterval(refreshRange, 60000);       // advance the live edge
+}
 
 document.getElementById('stress').onclick = () =>
   document.getElementById('stress-parts').classList.toggle('open');
@@ -1578,6 +1690,7 @@ function setStatus(ok, text) {
 }
 
 async function fetchAircraft() {
+  if (REPLAY) return;   // no position history — frozen during replay
   try {
     // airplanes.live not adsb.lol: same readsb API shape, but this one sends
     // CORS headers so it works from a plain browser page without a proxy
@@ -1625,6 +1738,7 @@ function renderAircraft() {
 }
 
 async function fetchRadar() {
+  if (REPLAY) return;   // live rain would mislead over a past snapshot
   try {
     const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
     const d = await r.json();
@@ -1665,6 +1779,7 @@ const WIND_GRID = (() => {
   return { lats, lons };
 })();
 async function fetchWind() {
+  if (REPLAY) return;   // current wind, not historical — frozen during replay
   try {
     const r = await fetch('https://api.open-meteo.com/v1/forecast' +
       `?latitude=${WIND_GRID.lats.join(',')}&longitude=${WIND_GRID.lons.join(',')}` +
@@ -1721,7 +1836,7 @@ async function fetchIncidents() {
   const count = document.getElementById('esa-count');
   try {
     // relative path → serve.py relay; upstream ESA feed sends no CORS headers
-    const r = await fetch('esa');
+    const r = await fetch(feedURL('esa'));
     if (!r.ok) throw new Error(r.status);
     const list = await r.json();
     const feats = list
@@ -1845,7 +1960,7 @@ document.getElementById('tog-quakes').onchange = e =>
 async function fetchFires() {
   const count = document.getElementById('fires-count');
   try {
-    const r = await fetch('firms');
+    const r = await fetch(feedURL('firms'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     map.getSource('fires').setData(geo);
@@ -1862,7 +1977,7 @@ async function fetchFires() {
 async function fetchRfs() {
   const count = document.getElementById('rfs-count');
   try {
-    const r = await fetch('rfs');
+    const r = await fetch(feedURL('rfs'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     const feats = geo.features
@@ -1909,7 +2024,7 @@ async function fetchRfs() {
 async function fetchPower() {
   const count = document.getElementById('power-count');
   try {
-    const r = await fetch('power');
+    const r = await fetch(feedURL('power'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     map.getSource('power').setData(geo);
@@ -1936,6 +2051,7 @@ async function fetchPower() {
 }
 
 async function fetchTransit() {
+  if (REPLAY) return;   // no position history — frozen during replay
   const count = document.getElementById('transit-count');
   try {
     const r = await fetch('transit');
@@ -1969,7 +2085,7 @@ async function fetchTransit() {
 async function fetchAirq() {
   const count = document.getElementById('airq-count');
   try {
-    const r = await fetch('airq');
+    const r = await fetch(feedURL('airq'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     map.getSource('airq').setData(geo);
@@ -1995,7 +2111,7 @@ async function fetchAirq() {
 async function fetchClosures() {
   const count = document.getElementById('closures-count');
   try {
-    const r = await fetch('closures');
+    const r = await fetch(feedURL('closures'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     map.getSource('closures').setData(geo);
@@ -2025,7 +2141,7 @@ async function fetchClosures() {
 async function fetchQuakes() {
   const count = document.getElementById('quakes-count');
   try {
-    const r = await fetch('quakes');
+    const r = await fetch(feedURL('quakes'));
     if (!r.ok) throw new Error(r.status);
     const geo = await r.json();
     const now = Date.now();

@@ -7,6 +7,9 @@ services:
     working_dir: /app
     volumes:
       - ./app:/app:ro
+      - ./data:/data          # writable: time-slider snapshot DB (in borg coverage)
+    environment:
+      - COP_DB=/data/history.db
     command: python3 serve.py
     ports:
       - "8899:8899"

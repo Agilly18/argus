@@ -25,11 +25,15 @@ Serves the static page and relays two feeds a browser can't reach directly:
 Run:  python3 serve.py  →  http://localhost:8899
 """
 import csv
+import gzip
+import hashlib
 import io
 import json
 import os
 import re
+import sqlite3
 import struct
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -855,12 +859,176 @@ def tomtom_tile(z, x, y):
     return body
 
 
+# --- history recorder + time-slider store ------------------------------------
+# An always-on background thread snapshots the incident feeds into SQLite so
+# the client can scrub backwards in time. It calls the same *_body() functions
+# the live endpoints use, so it respects their caches and generates no more
+# upstream load than a single live viewer. Snapshots are gzipped and only
+# written when the body actually changed (incident feeds are near-static when
+# quiet), which keeps the store to a few MB over the retention window.
+HISTORY_DB = _env.get("COP_DB",
+                      os.path.join(os.path.dirname(__file__), "history.db"))
+HISTORY_HOURS = int(_env.get("COP_HISTORY_HOURS", "72"))
+
+# source name -> (body function, poll interval seconds). The interval matches
+# each feed's own cache TTL — polling faster would just re-read the same cache.
+HISTORY_SOURCES = {
+    "esa": (esa_body, 60),
+    "rfs": (rfs_body, 60),
+    "power": (power_body, 120),
+    "firms": (firms_body, 600),
+    "closures": (closures_body, 600),
+    "quakes": (quakes_body, 600),
+    "airq": (airq_body, 900),
+}
+# empty payload per source, shaped like the live body so the client's parser
+# is unchanged when a time has no snapshot at/before it (ESA is a bare list;
+# everything else is a GeoJSON FeatureCollection).
+_EMPTY_BODY = {"esa": b"[]"}
+_EMPTY_FC = b'{"type":"FeatureCollection","features":[]}'
+
+_last_hash = {}  # source -> md5 of the last stored body, to skip duplicates
+
+
+def _db_conn():
+    conn = sqlite3.connect(HISTORY_DB, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")   # concurrent reads while recording
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def _db_init():
+    with _db_conn() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS snapshots ("
+                  "source TEXT NOT NULL, t INTEGER NOT NULL, body BLOB NOT NULL,"
+                  " PRIMARY KEY (source, t))")
+
+
+def _record(source, body):
+    """Store a gzipped snapshot, but only if it changed since the last one."""
+    h = hashlib.md5(body).hexdigest()
+    if _last_hash.get(source) == h:
+        return
+    with _db_conn() as c:
+        c.execute("INSERT OR REPLACE INTO snapshots(source, t, body) "
+                  "VALUES (?, ?, ?)",
+                  (source, int(time.time()), gzip.compress(body)))
+    _last_hash[source] = h
+
+
+def _prune():
+    cutoff = int(time.time()) - HISTORY_HOURS * 3600
+    with _db_conn() as c:
+        c.execute("DELETE FROM snapshots WHERE t < ?", (cutoff,))
+
+
+def _recorder():
+    _db_init()
+    # seed last-hash from the newest stored snapshot per source so a restart
+    # doesn't immediately write a duplicate of what's already there
+    try:
+        with _db_conn() as c:
+            for source in HISTORY_SOURCES:
+                row = c.execute("SELECT body FROM snapshots WHERE source=? "
+                                "ORDER BY t DESC LIMIT 1", (source,)).fetchone()
+                if row:
+                    _last_hash[source] = hashlib.md5(
+                        gzip.decompress(row[0])).hexdigest()
+    except Exception:
+        pass
+    next_due = {s: 0.0 for s in HISTORY_SOURCES}
+    last_prune = 0.0
+    while True:
+        now = time.time()
+        for source, (fn, interval) in HISTORY_SOURCES.items():
+            if now < next_due[source]:
+                continue
+            next_due[source] = now + interval
+            try:
+                _record(source, fn())
+            except Exception:
+                pass  # a dead feed (or missing API key) mustn't stop the rest
+        if now - last_prune > 3600:
+            last_prune = now
+            try:
+                _prune()
+            except Exception:
+                pass
+        time.sleep(5)
+
+
+def history_body(source, at):
+    """(as_of_epoch, body_bytes) for the newest snapshot at/before `at`, or
+    (0, empty-shaped body) if nothing was recorded that early."""
+    if source not in HISTORY_SOURCES:
+        raise KeyError(source)
+    with _db_conn() as c:
+        row = c.execute("SELECT t, body FROM snapshots WHERE source=? AND t<=? "
+                        "ORDER BY t DESC LIMIT 1", (source, at)).fetchone()
+    if not row:
+        return 0, _EMPTY_BODY.get(source, _EMPTY_FC)
+    return int(row[0]), gzip.decompress(row[1])
+
+
+def history_range_body():
+    """Per-source and overall min/max snapshot times, so the slider knows how
+    far back it can scrub."""
+    out = {}
+    with _db_conn() as c:
+        for source in HISTORY_SOURCES:
+            r = c.execute("SELECT MIN(t), MAX(t), COUNT(*) FROM snapshots "
+                          "WHERE source=?", (source,)).fetchone()
+            out[source] = {"min": r[0], "max": r[1], "count": r[2]}
+    mins = [v["min"] for v in out.values() if v["min"]]
+    maxs = [v["max"] for v in out.values() if v["max"]]
+    return json.dumps({"sources": out,
+                       "min": min(mins) if mins else None,
+                       "max": max(maxs) if maxs else None,
+                       "now": int(time.time())}).encode()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(302)
             self.send_header("Location", "/poc.html")
             self.end_headers()
+            return
+        if self.path.rstrip("/") == "/history/range":
+            try:
+                body = history_range_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "history unavailable")
+            return
+        hm = re.fullmatch(r"/history/(\w+)",
+                          urllib.parse.urlparse(self.path).path)
+        if hm:
+            at = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query).get("at", [""])[0]
+            try:
+                at = int(float(at)) if at else int(time.time())
+            except ValueError:
+                self.send_error(400, "bad at")
+                return
+            try:
+                as_of, body = history_body(hm.group(1), at)
+            except KeyError:
+                self.send_error(404, "unknown source")
+                return
+            except Exception:
+                self.send_error(502, "history unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Snapshot-Time", str(as_of))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         m = re.fullmatch(r"/tomtom/(\d+)/(\d+)/(\d+)\.png", self.path)
         if m:
@@ -1042,5 +1210,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("Canberra COP PoC → http://localhost:8899/poc.html  (Ctrl-C to stop)")
+    # Always-on recorder feeds the time slider; runs even with no viewers.
+    threading.Thread(target=_recorder, daemon=True).start()
     # Threading: one slow upstream fetch must not stall every other request
     ThreadingHTTPServer(("0.0.0.0", 8899), Handler).serve_forever()
