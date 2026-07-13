@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Canberra COP — proof of concept</title>
+<title>Argus — Canberra common operating picture</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -39,6 +39,9 @@
   #panel h1 { margin: 0 0 2px; font-size: 17px; color: var(--cyan);
     letter-spacing: 1px; }
   #panel .sub { color: var(--dim); margin-bottom: 10px; }
+  #panel .sub .beta { color: var(--amber); border: 1px solid var(--amber);
+    border-radius: 3px; padding: 0 4px; margin-left: 4px; font-size: 10px;
+    letter-spacing: 1px; }
   .row { display: flex; justify-content: space-between; margin: 2px 0; }
   .row .k { color: var(--dim); }
   hr { border: none; border-top: 1px solid var(--dim); margin: 8px 0; }
@@ -189,8 +192,8 @@
 
 <div id="panel">
   <div id="sheet-handle" title="tap to expand"></div>
-  <h1>CANBERRA COP</h1>
-  <div class="sub">proof of concept · all-source</div>
+  <h1>ARGUS</h1>
+  <div class="sub">Canberra · all-source · v0.01<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>

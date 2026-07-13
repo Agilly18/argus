@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canberra COP PoC server.
+"""Argus — Canberra common operating picture server.
 
 Serves the static page and relays two feeds a browser can't reach directly:
 - /esa — ACT ESA incidents (upstream sends no CORS headers)
@@ -113,7 +113,7 @@ def firms_body():
 
 def esa_body():
     if time.time() - _cache["time"] > CACHE_SECONDS:
-        req = urllib.request.Request(ESA_FEED, headers={"User-Agent": "canberra-cop-poc"})
+        req = urllib.request.Request(ESA_FEED, headers={"User-Agent": "argus-cop"})
         with urllib.request.urlopen(req, timeout=10) as r:
             body = r.read()
         json.loads(body)  # refuse to cache junk
@@ -134,7 +134,7 @@ def news_body():
         items = []
         for source, url in NEWS_FEEDS:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "canberra-cop-poc"})
+                req = urllib.request.Request(url, headers={"User-Agent": "argus-cop"})
                 with urllib.request.urlopen(req, timeout=10) as r:
                     root = ET.fromstring(r.read())
                 for it in root.findall(".//item"):
@@ -159,7 +159,7 @@ def news_body():
 # (a browser can't) and bias results to the Canberra region. Results are
 # cached per query and upstream calls throttled to Nominatim's 1 req/s limit.
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-GEOCODE_UA = "canberra-cop/1.0 (personal situational-awareness map)"
+GEOCODE_UA = "argus/0.01 (personal situational-awareness map)"
 # lon,lat,lon,lat box around the ACT — biases but doesn't hard-limit results
 GEOCODE_VIEWBOX = "148.6,-35.05,149.5,-35.65"
 GEOCODE_CACHE_SECONDS = 3600
@@ -536,7 +536,7 @@ _rfs_cache = {"time": 0.0, "body": b""}
 def rfs_body():
     # RFS asks consumers to poll no more often than every 60 s
     if time.time() - _rfs_cache["time"] > 60:
-        req = urllib.request.Request(RFS_FEED, headers={"User-Agent": "canberra-cop-poc"})
+        req = urllib.request.Request(RFS_FEED, headers={"User-Agent": "argus-cop"})
         with urllib.request.urlopen(req, timeout=10) as r:
             body = r.read()
         json.loads(body)  # refuse to cache junk
@@ -1217,7 +1217,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("Canberra COP PoC → http://localhost:8899/poc.html  (Ctrl-C to stop)")
+    print("Argus → http://localhost:8899/poc.html  (Ctrl-C to stop)")
     # Always-on recorder feeds the time slider; runs even with no viewers.
     threading.Thread(target=_recorder, daemon=True).start()
     # Threading: one slow upstream fetch must not stall every other request

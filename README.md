@@ -1,10 +1,15 @@
-# canberra-cop
+# Argus
 
-A common operating picture for Canberra, Australia — live aircraft, weather,
-rain radar, and emergency-service incidents on one map. Think Palantir, but
-cheap: every data source is free.
+An all-source common operating picture for Canberra, Australia — live aircraft,
+weather, rain radar, and emergency-service incidents on one map, with a history
+recorder so you can scrub back through time. Think Palantir, but cheap: every
+data source is free.
 
-![status](https://img.shields.io/badge/status-proof--of--concept-orange)
+Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the
+hundred-eyed watchman of Greek myth.
+
+![version](https://img.shields.io/badge/version-0.01-blue)
+![status](https://img.shields.io/badge/status-beta-orange)
 
 ## What it shows
 
@@ -66,8 +71,10 @@ server relays it.)
 - **Phase 2** — proper backend (FastAPI container), live buses via the
   MyWayPlus GTFS-realtime API (needs an approved developer key).
 - **Phase 3** — alert rules (loitering aircraft, incidents near a watchpoint,
-  storm cells inbound), per-decision saved views, time slider.
-- **Someday** — a local RTL-SDR receiver as a first-party ADS-B sensor.
+  storm cells inbound), per-decision saved views. *(Time slider done in v0.01:
+  the incident layers are recorded to a local store and can be replayed.)*
+- **Someday** — a local RTL-SDR receiver as a first-party ADS-B sensor, and a
+  Meshtastic mesh layer for own-network tracking.
 
 ## Data attribution
 
