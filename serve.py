@@ -163,7 +163,7 @@ def news_body():
 # (a browser can't) and bias results to the Canberra region. Results are
 # cached per query and upstream calls throttled to Nominatim's 1 req/s limit.
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-GEOCODE_UA = "argus/0.01 (personal situational-awareness map)"
+GEOCODE_UA = "argus/0.05 (personal situational-awareness map)"
 # lon,lat,lon,lat box around the ACT — biases but doesn't hard-limit results
 GEOCODE_VIEWBOX = "148.6,-35.05,149.5,-35.65"
 GEOCODE_CACHE_SECONDS = 3600
@@ -740,7 +740,7 @@ _aircraft_cache = {"time": 0.0, "body": b'{"ac":[]}'}
 def aircraft_body():
     if time.time() - _aircraft_cache["time"] > AIRCRAFT_CACHE_SECONDS:
         req = urllib.request.Request(AIRCRAFT_URL,
-                                     headers={"User-Agent": "argus/0.01"})
+                                     headers={"User-Agent": "argus/0.05"})
         with urllib.request.urlopen(req, timeout=10) as r:
             body = r.read()
         json.loads(body)  # refuse to cache junk
