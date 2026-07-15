@@ -273,6 +273,7 @@
       <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
       <label><input type="checkbox" id="tog-wind"> wind field</label>
       <label title="animated particle flow from live wind data"><input type="checkbox" id="tog-flow"> wind flow</label>
+      <label title="live webcam stills — imagery by Windy"><input type="checkbox" id="tog-cams"> webcams <span id="cams-note" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-suburbs" checked> suburb boundaries</label>
       <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-heat"> incident heat (72 h)</label>
@@ -1732,6 +1733,33 @@ map.on('load', () => {
   map.on('mouseenter', 'quakes', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'quakes', () => map.getCanvas().style.cursor = '');
 
+  // Windy webcams: visual ground truth — live stills at fixed spots. Layer
+  // exists from load; data arrives lazily on first toggle (needs WINDY_KEY).
+  map.addImage('cam', camIcon());
+  map.addSource('webcams', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'webcams', type: 'symbol', source: 'webcams',
+    layout: { 'icon-image': 'cam', 'icon-allow-overlap': true,
+      visibility: 'none' }
+  });
+  map.on('click', 'webcams', e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 12, maxWidth: '340px' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${p.title}</b><br>` +
+        (p.preview ? `<img src="${p.preview}" alt="${p.title}"
+          style="width:300px;max-width:100%;border-radius:4px;margin:4px 0"><br>` : '') +
+        `<span style="color:#565f89">${p.city ? p.city + ' · ' : ''}webcams by
+          <a href="https://www.windy.com" target="_blank" rel="noopener"
+          style="color:#7dcfff">Windy</a></span>` +
+        (p.page ? ` · <a href="${p.page}" target="_blank" rel="noopener"
+          style="color:#7dcfff">view ↗</a>` : ''))
+      .addTo(map);
+  });
+  map.on('mouseenter', 'webcams', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'webcams', () => map.getCanvas().style.cursor = '');
+
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
   fetchWeather();   setInterval(fetchWeather, 10 * 60000);
@@ -2337,6 +2365,41 @@ btn3d.onclick = () => {
   map.easeTo({ pitch: on ? 55 : 0, duration: 800 });
   btn3d.classList.toggle('on', on);
 };
+// camera glyph for the webcams layer, same canvas-icon scheme as the pins
+function camIcon() {
+  const c = document.createElement('canvas'); c.width = c.height = 26;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1a1b26'; g.strokeStyle = '#7dcfff'; g.lineWidth = 1.6;
+  g.beginPath(); g.roundRect(4, 9, 18, 12, 2.5); g.fill(); g.stroke();
+  g.beginPath(); g.arc(13, 15, 3.4, 0, 7); g.stroke();          // lens
+  g.beginPath(); g.moveTo(9, 9); g.lineTo(11, 5.5); g.lineTo(15, 5.5);
+  g.lineTo(17, 9); g.stroke();                                   // viewfinder
+  return g.getImageData(0, 0, 26, 26);
+}
+
+// webcams: lazy fetch on first toggle; refresh under the 10-min image-token
+// expiry so popup thumbnails stay alive
+let camsStarted = false;
+async function fetchWebcams() {
+  const note = document.getElementById('cams-note');
+  try {
+    const r = await fetch('webcams');
+    if (r.status === 503) { note.textContent = '(needs key)'; return; }
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    map.getSource('webcams').setData(d);
+    note.textContent = `(${d.features.length} · Windy)`;
+  } catch (e) { note.textContent = '(unreachable)'; }
+}
+document.getElementById('tog-cams').onchange = e => {
+  if (e.target.checked && !camsStarted) {
+    camsStarted = true;
+    fetchWebcams(); setInterval(fetchWebcams, 8 * 60000);
+  }
+  map.setLayoutProperty('webcams', 'visibility',
+    e.target.checked ? 'visible' : 'none');
+};
+
 // --- wind-flow particles -------------------------------------------------------
 // The windy.com party trick, built from our own data: /windfield serves a
 // 14x14 u/v grid (Open-Meteo, hourly); particles advect through it on a

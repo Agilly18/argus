@@ -771,6 +771,50 @@ def wind_body():
     return _wind_cache["body"]
 
 
+# --- Windy webcams --------------------------------------------------------------
+# Visual ground truth: live webcam stills near Canberra via the Windy Webcams
+# API v3 (free tier). Key stays server-side (WINDY_KEY in .env / container
+# env). Free-tier image URLs carry tokens that EXPIRE AFTER 10 MINUTES — the
+# cache TTL must stay under that or popups show dead thumbnails.
+WINDY_KEY = _cfg("WINDY_KEY", "")
+WEBCAMS_URL = ("https://api.windy.com/webcams/api/v3/webcams"
+               "?nearby=-35.28,149.13,150&limit=50"
+               "&include=images,location,player,urls")
+WEBCAMS_CACHE_SECONDS = 480   # 8 min < the 10-min image-token expiry
+_webcams_cache = {"time": 0.0, "body": b""}
+
+
+def webcams_body():
+    if time.time() - _webcams_cache["time"] > WEBCAMS_CACHE_SECONDS:
+        req = urllib.request.Request(
+            WEBCAMS_URL, headers={"x-windy-api-key": WINDY_KEY,
+                                  "User-Agent": "argus/0.06"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        feats = []
+        for cam in data.get("webcams", []):
+            loc = cam.get("location") or {}
+            if loc.get("latitude") is None:
+                continue
+            images = ((cam.get("images") or {}).get("current") or {})
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates":
+                             [loc["longitude"], loc["latitude"]]},
+                "properties": {
+                    "id": cam.get("webcamId"),
+                    "title": cam.get("title") or "webcam",
+                    "status": cam.get("status") or "?",
+                    "city": loc.get("city") or "",
+                    "preview": images.get("preview") or images.get("thumbnail") or "",
+                    "page": ((cam.get("urls") or {}).get("detail")
+                             or (cam.get("player") or {}).get("day") or ""),
+                }})
+        _webcams_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _webcams_cache["body"]
+
+
 # --- wind field for the particle-flow layer ------------------------------------
 # A denser Open-Meteo grid than /wind's 5x5 arrows: 14x14 over the wider
 # region, converted server-side to u/v components (m/s) so the client's
@@ -1339,6 +1383,20 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "wind feed unreachable")
+            return
+        if self.path.rstrip("/") == "/webcams":
+            if not WINDY_KEY:
+                self.send_error(503, "no WINDY_KEY in .env")
+                return
+            try:
+                body = webcams_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "webcams unreachable")
             return
         if self.path.rstrip("/") == "/windfield":
             try:
