@@ -1331,6 +1331,19 @@ map.on('load', () => {
       'line-width': 1.5 }
   });
 
+  // altitude stems: in 3D each aircraft floats at alt·tan(pitch) from its
+  // ground point — the stem hangs back down to where it really is
+  map.addSource('ac-stems', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'ac-stems', type: 'line', source: 'ac-stems',
+    paint: {
+      'line-color': ['case', ['==', ['get', 'mil'], 'true'],
+        '#f7768e', '#7dcfff'],
+      'line-width': 1, 'line-opacity': 0.35, 'line-dasharray': [1, 2]
+    }
+  });
+
   map.addSource('aircraft', { type: 'geojson',
     data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({
@@ -2092,6 +2105,9 @@ function setStatus(ok, text) {
   document.getElementById('status-text').textContent = text;
 }
 
+map.on('pitch', acReproject);
+map.on('rotate', acReproject);
+
 async function fetchAircraft() {
   const wasReplay = !!REPLAY;
   try {
@@ -2114,14 +2130,53 @@ async function fetchAircraft() {
   }
 }
 
+// --- aircraft in the 3D sky ------------------------------------------------
+// MapLibre symbols can't take a z, so when the camera is pitched we draw each
+// aircraft where an elevated point WOULD project: displaced from its ground
+// position by alt·tan(pitch), along the camera bearing (screen-up). A dashed
+// stem hangs back to the true spot. Pitch 0 → zero displacement → plain 2D.
+function acDisplace(lon, lat, altFt) {
+  const pitch = map.getPitch();
+  if (pitch < 2 || !altFt) return { lon, lat, stem: null };
+  const d = altFt * 0.3048 * Math.tan(Math.min(pitch, 65) * Math.PI / 180);
+  const b = map.getBearing() * Math.PI / 180;
+  const dlat = d * Math.cos(b) / 111320;
+  const dlon = d * Math.sin(b) / (111320 * Math.cos(lat * Math.PI / 180));
+  return { lon: lon + dlon, lat: lat + dlat,
+    stem: [[lon, lat], [lon + dlon, lat + dlat]] };
+}
+
+function paintAircraft() {  // geometry only — cheap enough to run per frame
+  const feats = [], stems = [];
+  for (const f of state.acFeats || []) {
+    const p = acDisplace(f.orig[0], f.orig[1], f.properties.alt);
+    feats.push({ type: 'Feature', properties: f.properties,
+      geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
+    if (p.stem) stems.push({ type: 'Feature',
+      properties: { mil: f.properties.mil },
+      geometry: { type: 'LineString', coordinates: p.stem } });
+  }
+  map.getSource('aircraft').setData({ type: 'FeatureCollection', features: feats });
+  map.getSource('ac-stems').setData({ type: 'FeatureCollection', features: stems });
+  acStemCount = stems.length;
+}
+
+// keep the displacement honest while the camera tilts/rotates
+let acRaf = null, acStemCount = 0;
+function acReproject() {
+  // nothing to do flat with no leftover stems to collapse
+  if (acRaf || !(state.acFeats || []).length ||
+      (map.getPitch() < 2 && !acStemCount)) return;
+  acRaf = requestAnimationFrame(() => { acRaf = null; paintAircraft(); });
+}
+
 function renderAircraft() {
-  const feats = state.planes.map(a => {
+  state.acFeats = state.planes.map(a => {
     const mil = ((a.dbFlags || 0) & 1) === 1;
     const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
     const kind = isHeli(a) ? 'heli' : 'plane';
     return {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
+      orig: [a.lon, a.lat],
       properties: {
         icon: `${kind}-${mil ? 'mil' : alt < 10000 ? 'lo' : 'hi'}`,
         track: a.track || 0,
@@ -2132,13 +2187,13 @@ function renderAircraft() {
       }
     };
   });
-  map.getSource('aircraft').setData({ type: 'FeatureCollection', features: feats });
-  document.getElementById('ac-count').textContent = `(${feats.length})`;
+  paintAircraft();
+  document.getElementById('ac-count').textContent = `(${state.acFeats.length})`;
 
-  document.getElementById('aclist').innerHTML = feats
+  document.getElementById('aclist').innerHTML = state.acFeats
     .sort((x, y) => y.properties.alt - x.properties.alt)
     .map(f => `<div class="ac ${f.properties.mil === 'true' ? 'mil' : ''}"
-      data-lon="${f.geometry.coordinates[0]}" data-lat="${f.geometry.coordinates[1]}">
+      data-lon="${f.orig[0]}" data-lat="${f.orig[1]}">
       <span>${f.properties.callsign}</span><span>${f.properties.type}</span>
       <span>${f.properties.alt.toLocaleString()} ft</span></div>`).join('');
   document.querySelectorAll('#aclist .ac').forEach(el =>
@@ -2532,8 +2587,10 @@ document.getElementById('windy-pop').onclick = () => {
   window.open(`https://www.windy.com/?${c.lat.toFixed(3)},${c.lng.toFixed(3)},` +
     `${Math.round(map.getZoom())}`, '_blank', 'noopener');
 };
-document.getElementById('tog-ac').onchange = e =>
-  map.setLayoutProperty('aircraft', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-ac').onchange = e => {
+  for (const id of ['aircraft', 'ac-stems'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
 document.getElementById('tog-radar').onchange = e =>
   map.getLayer('radar') &&
   map.setLayoutProperty('radar', 'visibility', e.target.checked ? 'visible' : 'none');
