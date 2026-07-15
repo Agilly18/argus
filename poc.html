@@ -28,10 +28,29 @@
     padding: 3px 8px; border-radius: 4px; white-space: nowrap;
     background: var(--green); color: var(--bg); border: none; }
   #timebar.replay #tb-live { background: var(--amber); }
-  #tb-slider { flex: 1; accent-color: var(--cyan); min-width: 80px; }
+  #tb-track { flex: 1; position: relative; display: flex;
+    align-items: center; min-width: 80px; }
+  #tb-slider { width: 100%; accent-color: var(--cyan); margin: 0; }
   #timebar.replay #tb-slider { accent-color: var(--amber); }
+  #tb-activity { position: absolute; left: 0; right: 0; bottom: -4px;
+    height: 4px; border-radius: 2px; pointer-events: none; opacity: 0.9; }
+  #tb-ticks { position: absolute; left: 0; right: 0; top: -6px; height: 6px;
+    pointer-events: none; }
+  .tb-tick { position: absolute; top: 0; width: 3px; height: 6px;
+    border-radius: 1px; pointer-events: auto; cursor: pointer; }
+  .tb-tick:hover { transform: scaleX(2); }
+  #tb-play, #tb-speed, .tb-n { font-family: monospace; font-size: 11px;
+    cursor: pointer; padding: 3px 6px; border-radius: 4px;
+    background: #1a1b2680; border: 1px solid var(--dim);
+    color: var(--cyan); white-space: nowrap; }
+  #tb-play:hover, #tb-speed:hover, .tb-n:hover { border-color: var(--cyan); }
+  #tb-play.on { background: var(--amber); color: var(--bg);
+    border-color: var(--amber); }
+  #tb-goto { font-family: monospace; font-size: 11px; background: #1a1b26;
+    color: var(--fg); border: 1px solid var(--cyan); border-radius: 4px; }
+  @media (max-width: 1100px) { .tb-nudge, #tb-speed { display: none; } }
   #tb-label { color: var(--dim); white-space: nowrap; min-width: 116px;
-    text-align: right; }
+    text-align: right; cursor: pointer; }
   #timebar.replay #tb-label { color: var(--amber); }
   #tb-coords { color: var(--dim); white-space: nowrap; cursor: copy;
     min-width: 235px; text-align: right; }
@@ -303,8 +322,22 @@
 
 <div id="timebar" class="live">
   <button id="tb-live" title="jump to live">● LIVE</button>
-  <input id="tb-slider" type="range" min="0" max="1" step="30" value="1" disabled>
-  <span id="tb-label">recording…</span>
+  <button id="tb-play" title="replay forward from here">▶</button>
+  <button id="tb-speed" title="playback speed (replay minutes per second)">1m/s</button>
+  <span class="tb-nudge">
+    <button class="tb-n" data-d="-3600" title="back 1 hour (shift+←)">−1h</button>
+    <button class="tb-n" data-d="-300" title="back 5 min (←)">−5m</button>
+  </span>
+  <div id="tb-track">
+    <div id="tb-activity" title="hourly activity — brighter = busier"></div>
+    <input id="tb-slider" type="range" min="0" max="1" step="30" value="1" disabled>
+    <div id="tb-ticks"></div>
+  </div>
+  <span class="tb-nudge">
+    <button class="tb-n" data-d="300" title="forward 5 min (→)">+5m</button>
+    <button class="tb-n" data-d="3600" title="forward 1 hour (shift+→)">+1h</button>
+  </span>
+  <span id="tb-label" title="click to jump to an exact time">recording…</span>
   <span id="tb-coords" title="cursor position — click to copy">—</span>
 </div>
 
@@ -1775,6 +1808,7 @@ function enterReplay(t) {
 }
 
 function goLive() {
+  stopPlay();                      // GO LIVE also halts a running playback
   const wasReplay = !!REPLAY;
   REPLAY = null;
   const bar = document.getElementById('timebar');
@@ -1797,7 +1831,134 @@ async function refreshRange() {
     tb.min = d.min; tb.max = d.now;
     slider.min = d.min; slider.max = d.now; slider.disabled = false;
     if (!REPLAY) { slider.value = d.now; label.textContent = 'live'; }
+    loadActivity(); renderTicks();
   } catch (e) { /* leave the bar as-is */ }
+}
+
+// --- slider: activity shading ------------------------------------------------
+// serve.py buckets snapshot-change counts per hour (dedup means rows only
+// exist when something changed) — paint them as a heat strip under the track.
+async function loadActivity() {
+  if (!tb.max) return;
+  try {
+    const d = await (await fetch('history/activity')).json();
+    const byHour = Object.fromEntries(d.buckets);
+    const peak = Math.max(1, ...d.buckets.map(b => b[1]));
+    const span = tb.max - tb.min || 1;
+    const stops = [];
+    for (let h = Math.floor(tb.min / 3600) * 3600; h < tb.max; h += 3600) {
+      const p0 = Math.max(0, (h - tb.min) / span * 100).toFixed(2);
+      const p1 = Math.min(100, (h + 3600 - tb.min) / span * 100).toFixed(2);
+      const a = (byHour[h] || 0) / peak;
+      const col = a === 0 ? 'transparent'
+        : a > 0.66 ? '#f7768e' : a > 0.33 ? '#e0af68' : '#3b4261';
+      stops.push(`${col} ${p0}% ${p1}%`);
+    }
+    document.getElementById('tb-activity').style.background =
+      `linear-gradient(90deg, ${stops.join(',')})`;
+  } catch (e) { /* strip is decorative */ }
+}
+
+// --- slider: event-feed tick marks --------------------------------------------
+// Significant feed events as clickable jump points. Feed history only exists
+// on this device (localStorage), so ticks cover what this browser has seen.
+const TICK_KINDS = { loiter: 'var(--red)', corr: '#bb9af7',
+  level: 'var(--cyan)', geo: 'var(--amber)' };
+function renderTicks() {
+  const box = document.getElementById('tb-ticks');
+  if (!tb.max) { box.innerHTML = ''; return; }
+  const span = tb.max - tb.min || 1;
+  const sig = feedState.events.filter(ev => (ev.kind in TICK_KINDS) || ev.zone ||
+    (ev.kind === 'new' && ['fire', 'hazmat', 'crash', 'rescue'].includes(ev.cat)));
+  box.innerHTML = sig.filter(ev => ev.t / 1000 >= tb.min).map(ev => {
+    const p = ((ev.t / 1000) - tb.min) / span * 100;
+    const col = TICK_KINDS[ev.kind] || 'var(--green)';
+    const tip = `${(ev.title || '').replace(/"/g, '&quot;')} · ${tbFmt(ev.t / 1000)}`;
+    return `<i class="tb-tick" style="left:${p.toFixed(2)}%;background:${col}"
+      title="${tip}" data-t="${Math.floor(ev.t / 1000)}"></i>`;
+  }).join('');
+  box.querySelectorAll('.tb-tick').forEach(el => el.onclick = () => {
+    const t = +el.dataset.t;
+    document.getElementById('tb-slider').value = t;
+    enterReplay(t);
+  });
+}
+
+// --- slider: playback ----------------------------------------------------------
+const play = { timer: null, speed: 60 };   // replay seconds per real second
+const PLAY_SPEEDS = [60, 300, 900];
+function stopPlay() {
+  clearInterval(play.timer); play.timer = null;
+  const b = document.getElementById('tb-play');
+  b.textContent = '▶'; b.classList.remove('on');
+}
+function initPlayback() {
+  document.getElementById('tb-speed').onclick = e => {
+    play.speed = PLAY_SPEEDS[(PLAY_SPEEDS.indexOf(play.speed) + 1) % PLAY_SPEEDS.length];
+    e.target.textContent = (play.speed / 60) + 'm/s';
+  };
+  document.getElementById('tb-play').onclick = () => {
+    if (play.timer) return stopPlay();
+    if (!tb.max) return;
+    const slider = document.getElementById('tb-slider');
+    if (!REPLAY) { slider.value = tb.min; enterReplay(tb.min); } // from the far edge
+    const b = document.getElementById('tb-play');
+    b.textContent = '⏸'; b.classList.add('on');
+    play.timer = setInterval(() => {
+      const t = (+slider.value) + play.speed;  // follows manual scrubs too
+      if (t >= tb.max - 30) { stopPlay(); goLive(); return; }
+      slider.value = t; enterReplay(t);
+    }, 1000);
+  };
+}
+
+// --- slider: precision controls -------------------------------------------------
+function nudge(d) {
+  if (!tb.max) return;
+  const slider = document.getElementById('tb-slider');
+  const t = Math.max(tb.min, (REPLAY ?? tb.max) + d);
+  if (t >= tb.max - 30) goLive();
+  else { slider.value = t; enterReplay(t); }
+}
+function initPrecision() {
+  document.querySelectorAll('.tb-n').forEach(b =>
+    b.onclick = () => nudge(+b.dataset.d));
+  // arrow keys scrub while in replay (typing fields excluded)
+  document.addEventListener('keydown', e => {
+    // typing fields keep their keys; focused map canvas keeps arrow-panning
+    if (/INPUT|TEXTAREA|SELECT|CANVAS/.test(e.target.tagName) || !REPLAY) return;
+    if (e.key === 'ArrowLeft') { nudge(e.shiftKey ? -3600 : -300); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { nudge(e.shiftKey ? 3600 : 300); e.preventDefault(); }
+  });
+  // click the timestamp → type an exact time
+  document.getElementById('tb-label').onclick = () => {
+    if (!tb.max || document.getElementById('tb-goto')) return;
+    const label = document.getElementById('tb-label');
+    const cur = new Date((REPLAY ?? tb.max) * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    const inp = document.createElement('input');
+    inp.type = 'datetime-local'; inp.id = 'tb-goto';
+    inp.value = `${cur.getFullYear()}-${pad(cur.getMonth() + 1)}-${pad(cur.getDate())}` +
+                `T${pad(cur.getHours())}:${pad(cur.getMinutes())}`;
+    label.replaceChildren(inp); inp.focus();
+    const done = commit => {
+      inp.onblur = inp.onkeydown = null;      // Esc must beat the blur handler
+      if (commit && inp.value) {
+        const t = Math.floor(new Date(inp.value).getTime() / 1000);
+        if (t >= tb.max - 30) { goLive(); return; }
+        if (t >= tb.min) {
+          document.getElementById('tb-slider').value = t;
+          enterReplay(t); return;
+        }
+      }
+      label.textContent = REPLAY ? 'REPLAY ' + tbFmt(REPLAY) : 'live';
+    };
+    inp.onkeydown = ev => {
+      if (ev.key === 'Enter') done(true);
+      if (ev.key === 'Escape') done(false);
+    };
+    inp.onblur = () => done(true);
+  };
 }
 
 function initTimebar() {
@@ -1808,6 +1969,8 @@ function initTimebar() {
     else enterReplay(v);
   };
   document.getElementById('tb-live').onclick = goLive;
+  initPlayback();
+  initPrecision();
   refreshRange();
   setInterval(refreshRange, 60000);       // advance the live edge
 }

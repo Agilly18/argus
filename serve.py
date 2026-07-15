@@ -1125,6 +1125,32 @@ def esahist_body():
     return _esahist_cache["body"]
 
 
+# --- activity histogram --------------------------------------------------------
+# The recorder's md5 dedup means a snapshot row only exists when a feed's
+# content CHANGED — so row count per hour is a free "how eventful was this
+# hour" signal for shading the time slider. Movers (aircraft/transit) and
+# ambient sources change every tick, so only incident-ish sources count.
+ACTIVITY_SOURCES = ("esa", "rfs", "power", "firms", "closures", "quakes",
+                    "airq", "bom")
+ACTIVITY_CACHE_SECONDS = 300
+_activity_cache = {"time": 0.0, "body": b""}
+
+
+def history_activity_body():
+    if time.time() - _activity_cache["time"] > ACTIVITY_CACHE_SECONDS:
+        cutoff = int(time.time()) - HISTORY_HOURS * 3600
+        marks = ",".join("?" * len(ACTIVITY_SOURCES))
+        with _db_conn() as c:
+            rows = c.execute(
+                f"SELECT (t/3600)*3600 AS hr, COUNT(*) FROM snapshots "
+                f"WHERE t >= ? AND source IN ({marks}) "
+                f"GROUP BY hr ORDER BY hr",
+                (cutoff, *ACTIVITY_SOURCES)).fetchall()
+        _activity_cache.update(time=time.time(), body=json.dumps(
+            {"buckets": [[int(r[0]), int(r[1])] for r in rows]}).encode())
+    return _activity_cache["body"]
+
+
 def history_range_body():
     """Per-source and overall min/max snapshot times, so the slider knows how
     far back it can scrub."""
@@ -1159,6 +1185,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "history unavailable")
+            return
+        # NB: must precede the /history/<source> regex, which would otherwise
+        # swallow "activity" as an unknown source
+        if self.path.rstrip("/") == "/history/activity":
+            try:
+                body = history_activity_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "activity unavailable")
             return
         hm = re.fullmatch(r"/history/(\w+)",
                           urllib.parse.urlparse(self.path).path)
