@@ -4,8 +4,9 @@
 <meta charset="utf-8">
 <title>Argus — Canberra common operating picture</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
-<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<!-- 5.x needed: the 2026 OpenFreeMap planet tiles use MVT fields 4.x can't parse -->
+<link href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
 <style>
   :root {
     --bg: #1a1b26; --panel: #24283bee; --fg: #c0caf5; --dim: #565f89;
@@ -30,7 +31,14 @@
   #tb-label { color: var(--dim); white-space: nowrap; min-width: 116px;
     text-align: right; }
   #timebar.replay #tb-label { color: var(--amber); }
-  @media (max-width: 700px) { #timebar { left: 12px; bottom: 168px; } }
+  #tb-coords { color: var(--dim); white-space: nowrap; cursor: copy;
+    min-width: 235px; text-align: right; }
+  #tb-coords.flash { color: var(--green); }
+  @media (max-width: 700px) { #timebar { left: 12px; bottom: 168px; }
+    #tb-coords { display: none; } }
+  /* keep scale bar + attribution clear of the timebar */
+  .maplibregl-ctrl-bottom-right { bottom: 44px; }
+  @media (max-width: 700px) { .maplibregl-ctrl-bottom-right { bottom: 205px; } }
 
   #panel { position: absolute; z-index: 5; top: 12px; left: 12px; width: 320px;
     max-height: calc(100vh - 24px); overflow-y: auto;
@@ -134,11 +142,13 @@
     border-radius: 4px; color: var(--fg); font-family: monospace;
     font-size: 12px; padding: 4px 6px; box-sizing: border-box; }
   #zone-name:focus, #zone-km:focus { outline: none; border-color: var(--cyan); }
-  #zone-add, #zone-poly, #rb-btn { background: #1a1b2680;
+  #zone-add, #zone-poly, #rb-btn, #tog-3d { background: #1a1b2680;
     border: 1px solid var(--dim); border-radius: 4px; color: var(--cyan);
     font-family: monospace; font-size: 12px; padding: 4px 8px;
     cursor: pointer; white-space: nowrap; }
-  #zone-add:hover, #zone-poly:hover, #rb-btn:hover { border-color: var(--cyan); }
+  #zone-add:hover, #zone-poly:hover, #rb-btn:hover, #tog-3d:hover { border-color: var(--cyan); }
+  #tog-3d { padding: 1px 8px; }
+  #tog-3d.on { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
   #zone-add:disabled, #zone-poly:disabled { color: var(--amber); cursor: crosshair; }
   #rb-btn { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
   #zonelist .zn { cursor: pointer; padding: 2px 4px; border-radius: 4px;
@@ -218,15 +228,22 @@
     <div class="sec-b">
       <div class="row" id="basemap" style="gap:8px; justify-content:flex-start">
         <span class="k">map</span>
-        <label style="margin:0"><input type="radio" name="base" value="base" checked> dark</label>
+        <label style="margin:0" title="Tokyo-Night vector basemap"><input type="radio" name="base" value="vector" checked> dark+</label>
+        <label style="margin:0"><input type="radio" name="base" value="base"> dark</label>
         <label style="margin:0"><input type="radio" name="base" value="base-street"> street</label>
         <label style="margin:0"><input type="radio" name="base" value="base-sat"> satellite</label>
+      </div>
+      <div class="row" style="gap:8px; justify-content:flex-start">
+        <label style="margin:0"><input type="checkbox" id="tog-hillshade"> hillshade</label>
+        <button id="tog-3d" title="tilt into 3D terrain (drag with right mouse / two fingers to look around)">◱ 3D</button>
       </div>
       <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-trails" checked> trails</label>
       <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
       <label><input type="checkbox" id="tog-wind"> wind field</label>
+      <label><input type="checkbox" id="tog-suburbs" checked> suburb boundaries</label>
       <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
+      <label><input type="checkbox" id="tog-heat"> incident heat (72 h)</label>
       <label><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
       <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
@@ -278,6 +295,7 @@
   <button id="tb-live" title="jump to live">● LIVE</button>
   <input id="tb-slider" type="range" min="0" max="1" step="30" value="1" disabled>
   <span id="tb-label">recording…</span>
+  <span id="tb-coords" title="cursor position — click to copy">—</span>
 </div>
 
 <script>
@@ -316,6 +334,18 @@ const map = new maplibregl.Map({
         // note {y}/{x} order — ArcGIS tile scheme
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
         attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'
+      },
+      // AWS Open Data terrain (Terrarium-encoded), keyless. Two identical
+      // sources on purpose: MapLibre warns (and can flicker) when hillshade
+      // and setTerrain() share one raster-dem source
+      dem: {
+        type: 'raster-dem', encoding: 'terrarium', tileSize: 256, maxzoom: 15,
+        tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+        attribution: 'terrain: Mapzen/AWS'
+      },
+      'dem-hs': {
+        type: 'raster-dem', encoding: 'terrarium', tileSize: 256, maxzoom: 15,
+        tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png']
       }
     },
     layers: [
@@ -323,11 +353,75 @@ const map = new maplibregl.Map({
       { id: 'base-street', type: 'raster', source: 'osm',
         layout: { visibility: 'none' } },
       { id: 'base-sat', type: 'raster', source: 'esri',
-        layout: { visibility: 'none' } }
+        layout: { visibility: 'none' } },
+      // ridge/valley shading over the basemap, muted for the dark theme
+      { id: 'hillshade', type: 'hillshade', source: 'dem-hs',
+        layout: { visibility: 'none' },
+        paint: { 'hillshade-shadow-color': '#16161e',
+                 'hillshade-highlight-color': '#414868',
+                 'hillshade-accent-color': '#1a1b26',
+                 'hillshade-exaggeration': 0.5 } }
     ]
   }
 });
-map.addControl(new maplibregl.NavigationControl(), 'top-right');
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+map.addControl(new maplibregl.FullscreenControl(), 'top-right');
+// geolocation API is https-only (same rule as notifications) — on plain
+// http the control would just error, so don't offer it at all
+if (window.isSecureContext)
+  map.addControl(new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true
+  }), 'top-right');
+map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
+
+// --- coordinate readout (lat/lon + MGRS) ------------------------------------
+// Self-contained WGS84 → UTM → MGRS conversion (no library). Canberra is
+// zone 55H, square FA; digits=4 gives 10 m precision.
+function toMGRS(lat, lon, digits = 4) {
+  const D2R = Math.PI / 180;
+  const a = 6378137, f = 1 / 298.257223563;
+  const e2 = f * (2 - f), ep2 = e2 / (1 - e2), k0 = 0.9996;
+  const zone = Math.max(1, Math.min(60, Math.floor((lon + 180) / 6) + 1));
+  const lat0 = lat * D2R, dLon = (lon - (zone * 6 - 183)) * D2R;
+  const sin = Math.sin(lat0), cos = Math.cos(lat0), tan = Math.tan(lat0);
+  const N = a / Math.sqrt(1 - e2 * sin * sin);
+  const T = tan * tan, C = ep2 * cos * cos, A = cos * dLon;
+  const M = a * ((1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 ** 3 / 256) * lat0
+    - (3 * e2 / 8 + 3 * e2 * e2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * lat0)
+    + (15 * e2 * e2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * lat0)
+    - (35 * e2 ** 3 / 3072) * Math.sin(6 * lat0));
+  const E = k0 * N * (A + (1 - T + C) * A ** 3 / 6
+    + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * A ** 5 / 120) + 500000;
+  let Nn = k0 * (M + N * tan * (A * A / 2 + (5 - T + 9 * C + 4 * C * C) * A ** 4 / 24
+    + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * A ** 6 / 720));
+  if (lat < 0) Nn += 10000000;
+  const band = 'CDEFGHJKLMNPQRSTUVWX'[Math.max(0, Math.min(19, Math.floor((lat + 80) / 8)))];
+  const col = ['ABCDEFGH', 'JKLMNPQR', 'STUVWXYZ'][(zone - 1) % 3][Math.floor(E / 100000) - 1];
+  const row = (zone % 2 ? 'ABCDEFGHJKLMNPQRSTUV'
+                        : 'FGHJKLMNPQRSTUVABCDE')[Math.floor(Nn / 100000) % 20];
+  const trim = v => String(Math.floor(v % 100000)).padStart(5, '0').slice(0, digits);
+  return `${zone}${band} ${col}${row} ${trim(E)} ${trim(Nn)}`;
+}
+
+const tbCoords = document.getElementById('tb-coords');
+function showCoords(lngLat) {
+  tbCoords.textContent = `${lngLat.lat.toFixed(5)}, ${lngLat.lng.toFixed(5)} · ` +
+    toMGRS(lngLat.lat, lngLat.lng);
+}
+let coordsRaf = null;
+map.on('mousemove', e => {
+  if (coordsRaf) return;                    // throttle to one update per frame
+  coordsRaf = requestAnimationFrame(() => { coordsRaf = null; showCoords(e.lngLat); });
+});
+map.on('click', e => showCoords(e.lngLat)); // touch devices: tap to set
+tbCoords.onclick = () => {
+  if (tbCoords.textContent === '—') return;
+  navigator.clipboard?.writeText(tbCoords.textContent).then(() => {
+    tbCoords.classList.add('flash');
+    setTimeout(() => tbCoords.classList.remove('flash'), 600);
+  }).catch(() => {});                       // clipboard is https-only; shrug
+};
 
 // Helicopter icon, FR24-style top-down: cabin + tail boom + crossed main
 // rotor blades; same colour-class scheme as the planes
@@ -1132,6 +1226,44 @@ map.on('load', () => {
   map.addImage('closure-on',    incidentIcon('road'));
   map.addImage('closure-soon',  incidentIcon('road', '#565f89'));
 
+  initVectorBase();   // Tokyo-Night vector basemap, injected under the rasters
+
+  // ACT suburb boundaries: static reference layer under everything else —
+  // answers "where is that pin" without a basemap squint
+  map.addSource('suburbs', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'suburbs-line', type: 'line', source: 'suburbs',
+    paint: { 'line-color': '#3b4261', 'line-width': 1, 'line-opacity': 0.7 }
+  });
+  map.addLayer({
+    id: 'suburbs-label', type: 'symbol', source: 'suburbs',
+    minzoom: 11.5,
+    layout: { 'text-field': ['get', 'SUBURB'],
+      'text-font': ['Open Sans Regular'], 'text-size': 10,
+      'text-transform': 'uppercase', 'text-letter-spacing': 0.1 },
+    paint: { 'text-color': '#565f89', 'text-opacity': 0.8,
+      'text-halo-color': '#1a1b26', 'text-halo-width': 1.2 }
+  });
+  fetchSuburbs();
+
+  // 72 h incident-density heat: fed by /esahist (recorder aggregate); data
+  // loads lazily on first toggle, like the wind field
+  map.addSource('esa-heat', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'esa-heat', type: 'heatmap', source: 'esa-heat',
+    layout: { visibility: 'none' },
+    paint: {
+      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 9, 14, 13, 34],
+      'heatmap-intensity': 0.8,
+      'heatmap-opacity': 0.55,
+      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'],
+        0, 'rgba(26,27,38,0)', 0.3, '#3b4261', 0.55, '#7dcfff',
+        0.75, '#e0af68', 1, '#f7768e']
+    }
+  });
+
   // breadcrumb trails: fading segments behind anything that moves —
   // a poor man's time slider, no server state needed
   map.addSource('trails', { type: 'geojson',
@@ -1597,9 +1729,16 @@ function clearLiveLayers() {
 // replay, restore to its toggle state when live. wind replays from history,
 // so its visibility just follows its toggle.
 function setLiveRastersVisible(vis) {
-  if (!map.getLayer('radar')) return;
-  const on = vis && document.getElementById('tog-radar').checked;
-  map.setLayoutProperty('radar', 'visibility', on ? 'visible' : 'none');
+  if (map.getLayer('radar')) {
+    const on = vis && document.getElementById('tog-radar').checked;
+    map.setLayoutProperty('radar', 'visibility', on ? 'visible' : 'none');
+  }
+  // the 72 h heat aggregate is live-only too — a rolling window has no
+  // meaning at a historical T
+  if (map.getLayer('esa-heat')) {
+    const on = vis && document.getElementById('tog-heat').checked;
+    map.setLayoutProperty('esa-heat', 'visibility', on ? 'visible' : 'none');
+  }
 }
 
 function enterReplay(t) {
@@ -1930,13 +2069,86 @@ async function fetchIncidents() {
   }
 }
 
+// Basemaps: three raster groups + the "dark+" Tokyo-Night vector group
+// (vt-* layers injected from vt-style.json below 'base', so a visible raster
+// always covers them). Until the vector style has loaded, 'dark+' keeps the
+// carto raster up rather than showing a void.
+const VT_IDS = [];
+function applyBasemap(v) {
+  for (const id of ['base', 'base-street', 'base-sat'])
+    map.setLayoutProperty(id, 'visibility', id === v ? 'visible' : 'none');
+  for (const id of VT_IDS)
+    map.setLayoutProperty(id, 'visibility', v === 'vector' ? 'visible' : 'none');
+  if (v === 'vector' && !VT_IDS.length)
+    map.setLayoutProperty('base', 'visibility', 'visible');
+}
 document.querySelectorAll('#basemap input').forEach(radio =>
-  radio.onchange = () => {
-    for (const id of ['base', 'base-street', 'base-sat'])
-      map.setLayoutProperty(id, 'visibility',
-        id === radio.value ? 'visible' : 'none');
-  });
+  radio.onchange = () => applyBasemap(radio.value));
 
+async function initVectorBase() {
+  const vecRadio = document.querySelector('#basemap input[value="vector"]');
+  try {
+    // no-cache: revalidate so a regenerated style isn't shadowed by the
+    // browser's copy (stale fonts here = silent glyph failures)
+    const st = await (await fetch('vt-style.json', { cache: 'no-cache' })).json();
+    for (const [id, src] of Object.entries(st.sources))
+      if (!map.getSource(id)) map.addSource(id, src);
+    for (const lyr of st.layers) {
+      map.addLayer(lyr, 'base');       // insert below the raster basemaps
+      VT_IDS.push(lyr.id);
+    }
+    applyBasemap(document.querySelector('#basemap input:checked').value);
+  } catch (e) {
+    // no vt-style.json (or OFM down): raster fallback, grey the option out
+    vecRadio.disabled = true;
+    if (vecRadio.checked) {
+      document.querySelector('#basemap input[value="base"]').checked = true;
+      applyBasemap('base');
+    }
+  }
+}
+
+// suburb boundaries: static, fetched once (gentle retry if serve.py was busy)
+async function fetchSuburbs() {
+  try {
+    const r = await fetch('suburbs');
+    if (!r.ok) throw new Error(r.status);
+    map.getSource('suburbs').setData(await r.json());
+  } catch (e) { setTimeout(fetchSuburbs, 60000); }
+}
+document.getElementById('tog-suburbs').onchange = e => {
+  for (const id of ['suburbs-line', 'suburbs-label'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
+
+// 72 h incident heat: /esahist is a rolling live aggregate, so it hides in
+// replay (setLiveRastersVisible) and its toggle is inert until back live
+let heatStarted = false;
+async function fetchEsaHeat() {
+  try {
+    const r = await fetch('esahist');
+    if (!r.ok) throw new Error(r.status);
+    map.getSource('esa-heat').setData(await r.json());
+  } catch (e) { /* next interval retries */ }
+}
+document.getElementById('tog-heat').onchange = e => {
+  if (e.target.checked && !heatStarted) {
+    heatStarted = true;
+    fetchEsaHeat(); setInterval(fetchEsaHeat, 10 * 60000);
+  }
+  if (!REPLAY) map.setLayoutProperty('esa-heat', 'visibility',
+    e.target.checked ? 'visible' : 'none');
+};
+
+document.getElementById('tog-hillshade').onchange = e =>
+  map.setLayoutProperty('hillshade', 'visibility', e.target.checked ? 'visible' : 'none');
+const btn3d = document.getElementById('tog-3d');
+btn3d.onclick = () => {
+  const on = !map.getTerrain();
+  map.setTerrain(on ? { source: 'dem', exaggeration: 1.3 } : null);
+  map.easeTo({ pitch: on ? 55 : 0, duration: 800 });
+  btn3d.classList.toggle('on', on);
+};
 document.getElementById('tog-ac').onchange = e =>
   map.setLayoutProperty('aircraft', 'visibility', e.target.checked ? 'visible' : 'none');
 document.getElementById('tog-radar').onchange = e =>

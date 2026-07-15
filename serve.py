@@ -656,6 +656,30 @@ def closures_body():
     return _closures_cache["body"]
 
 
+# --- ACT suburb boundaries -----------------------------------------------------
+# Static reference layer, same ArcGIS host as the closures feed. All 139
+# polygons fit a single query (maxRecordCount 1000); maxAllowableOffset
+# generalises geometry server-side so the payload stays lean. Suburbs don't
+# move — cache for a day.
+SUBURBS_URL = ("https://services1.arcgis.com/E5n4f1VY84i0xSjy/arcgis/rest/"
+               "services/Suburbs_ACT/FeatureServer/0/query")
+SUBURBS_CACHE_SECONDS = 86400
+_suburbs_cache = {"time": 0.0, "body": b""}
+
+
+def suburbs_body():
+    if time.time() - _suburbs_cache["time"] > SUBURBS_CACHE_SECONDS:
+        qs = urllib.parse.urlencode({
+            "where": "1=1", "outFields": "SUBURB",
+            "maxAllowableOffset": "0.0002", "f": "geojson"})
+        body = _http_get(f"{SUBURBS_URL}?{qs}")
+        data = json.loads(body)
+        if "error" in data:
+            raise ValueError(data["error"])
+        _suburbs_cache.update(time=time.time(), body=body)
+    return _suburbs_cache["body"]
+
+
 # --- earthquakes -------------------------------------------------------------
 # Geoscience Australia's GeoServer WFS; the 7-day layer is global (~50
 # events), so keep Australian-flagged quakes plus anything in a box around
@@ -1061,6 +1085,46 @@ def history_body(source, at):
     return int(row[0]), gzip.decompress(row[1])
 
 
+# --- 72 h incident heat --------------------------------------------------------
+# Unique ESA incidents seen in the recorder's last ESAHIST_HOURS of snapshots,
+# flattened to bare GeoJSON points — density fuel for the client heatmap.
+# Reads our own history DB, so it costs no upstream calls.
+ESAHIST_HOURS = 72
+ESAHIST_CACHE_SECONDS = 600
+_esahist_cache = {"time": 0.0, "body": b""}
+
+
+def esahist_body():
+    if time.time() - _esahist_cache["time"] > ESAHIST_CACHE_SECONDS:
+        cutoff = int(time.time()) - ESAHIST_HOURS * 3600
+        with _db_conn() as c:
+            rows = c.execute("SELECT body FROM snapshots WHERE source='esa' "
+                             "AND t>=? ORDER BY t", (cutoff,)).fetchall()
+        seen = {}  # guid -> (lon, lat); later snapshots win
+        for (blob,) in rows:
+            try:
+                items = json.loads(gzip.decompress(blob))
+            except Exception:
+                continue
+            for i in items:
+                if i.get("state") != "ACT":
+                    continue
+                pt = (i.get("point") or {}).get("coordinates")
+                if not pt or len(pt) != 2:
+                    continue
+                try:  # feed ships [lat, lon] as strings
+                    lat, lon = float(pt[0]), float(pt[1])
+                except (TypeError, ValueError):
+                    continue
+                seen[i.get("guid") or i.get("title")] = (lon, lat)
+        feats = [{"type": "Feature",
+                  "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                  "properties": {}} for lon, lat in seen.values()]
+        _esahist_cache.update(time=time.time(), body=json.dumps(
+            {"type": "FeatureCollection", "features": feats}).encode())
+    return _esahist_cache["body"]
+
+
 def history_range_body():
     """Per-source and overall min/max snapshot times, so the slider knows how
     far back it can scrub."""
@@ -1312,6 +1376,28 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception:
                 self.send_error(502, "firms unreachable")
+            return
+        if self.path.rstrip("/") == "/suburbs":
+            try:
+                body = suburbs_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "suburb boundaries unreachable")
+            return
+        if self.path.rstrip("/") == "/esahist":
+            try:
+                body = esahist_body()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(502, "incident history unavailable")
             return
         if self.path.rstrip("/") == "/esa":
             try:
