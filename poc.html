@@ -180,6 +180,22 @@
   #zonelist .zn-x:hover { color: var(--red); }
   .fe.fe-zone { background: #7dcfff14; }
 
+  #tracklist .tk { display: flex; justify-content: space-between; gap: 6px;
+    align-items: center; cursor: pointer; padding: 2px 4px;
+    border-radius: 4px; font-size: 12px; }
+  #tracklist .tk:hover { background: #414868; }
+  #tracklist .tk.dark { opacity: .45; }
+  #tracklist .tk-x { color: var(--dim); cursor: pointer; padding: 0 5px; }
+  #tracklist .tk-x:hover { color: var(--red); }
+  #tracklist .tk-f { color: var(--dim); cursor: pointer; padding: 0 4px; }
+  #tracklist .tk-f:hover { color: var(--fg); }
+  #tracklist .tk-f.on { color: var(--amber); }
+  .trk-btn { display: block; margin-top: 6px; background: #1a1b2680;
+    border: 1px solid var(--dim); border-radius: 4px; color: var(--amber);
+    font-family: monospace; font-size: 11px; padding: 2px 8px;
+    cursor: pointer; }
+  .trk-btn:hover { border-color: var(--amber); }
+
   #feed-filter { cursor: pointer; color: var(--dim); }
   #feed-filter:hover { color: var(--fg); }
   #feed-filter.sig { color: var(--cyan); }
@@ -233,7 +249,7 @@
 <div id="panel">
   <div id="sheet-handle" title="tap to expand"></div>
   <h1>ARGUS</h1>
-  <div class="sub">Canberra · all-source · v0.06<span class="beta">BETA</span></div>
+  <div class="sub">Canberra · all-source · v0.07<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>
@@ -306,6 +322,12 @@
       <label><input type="checkbox" id="tog-notify"> desktop alerts <span id="notify-note" class="k"></span></label>
       <label><input type="checkbox" id="tog-sound"> alert sounds</label>
     </div>
+  </div>
+  <hr>
+  <div class="sec" data-sec="tracked">
+    <div class="row sec-h"><span class="k">tracked</span>
+      <span><span id="track-note" style="color:var(--dim)"></span> <span class="k sec-a">▾</span></span></div>
+    <div class="sec-b"><div id="tracklist"></div></div>
   </div>
   <hr>
   <div class="sec" data-sec="feed">
@@ -923,8 +945,9 @@ function feedEvent(kind, src, i, note) {
   feedState.events = feedState.events.slice(0, 100);
   renderFeed();
   // notification-worthy: alerts, anything in a watch zone, emergency-level
-  // fire warnings, major BOM warnings, stress level changes
-  if (kind === 'loiter' || kind === 'corr' || kind === 'level' || zone ||
+  // fire warnings, major BOM warnings, stress level changes, tracked entities
+  if (kind === 'loiter' || kind === 'corr' || kind === 'level' ||
+      kind === 'trk' || zone || isTrackedFeed(src, i.id) ||
       (i.detail || '').includes('Emergency Warning') ||
       (src === 'BOM' && i.detail === 'major'))
     notify(`COP ${(FEED_KIND[kind] || ['?'])[0]}: ${i.title}`,
@@ -937,7 +960,7 @@ function saveFeed() {
 const FEED_KIND = { new: ['NEW', 'var(--green)'], update: ['UPD', 'var(--amber)'],
   cleared: ['CLR', 'var(--dim)'], loiter: ['AIR', 'var(--red)'],
   corr: ['CORR', '#bb9af7'], level: ['LVL', 'var(--cyan)'],
-  geo: ['GEO', 'var(--amber)'] };
+  geo: ['GEO', 'var(--amber)'], trk: ['TRK', 'var(--amber)'] };
 // display-only noise filter: significant mode hides the routine ambulance /
 // planned-burn churn; loiter + corr always show. Events are recorded either way.
 const feedFilter = { sig: localStorage.getItem('copFeedSig') === '1' };
@@ -978,28 +1001,180 @@ document.getElementById('feed-filter').onclick = e => {
   renderFeed();
 };
 
+// --- entity tracking: pin an aircraft / vehicle / incident of interest ---
+// TAK-style watchlist: tracked entities get an amber highlight ring, longer
+// brighter trails, went-dark/reacquired feed alerts and optional camera follow.
+const TRACKS = JSON.parse(localStorage.getItem('copTracks') || '[]');
+const trackState = {};        // key → { lastSeen, dark, lastPos } (session-only)
+let FOLLOW = null;            // key of the one entity the camera is glued to
+const trackKey = t => t.type + '|' + t.id;
+const isTracked = (type, id) => TRACKS.some(t => t.type === type && t.id === id);
+// feed-source names → track types, so tracked incidents force a notification
+const TRACK_SRC = { 'ACT ESA': 'esa', 'NSW RFS': 'rfs' };
+const isTrackedFeed = (src, id) =>
+  TRACK_SRC[src] ? isTracked(TRACK_SRC[src], id) : false;
+
+function toggleTrack(type, id, label) {
+  const i = TRACKS.findIndex(t => t.type === type && t.id === id);
+  if (i >= 0) {
+    const k = trackKey(TRACKS[i]);
+    if (FOLLOW === k) FOLLOW = null;
+    delete trackState[k];
+    TRACKS.splice(i, 1);
+  } else TRACKS.push({ type, id, label, added: Date.now() });
+  localStorage.setItem('copTracks', JSON.stringify(TRACKS));
+  renderTracked();
+}
+
+// current position of a tracked entity, or null while it's dark.
+// lon/lat = drawn position (aircraft: displaced 3D spot); orig = true ground.
+function trackPos(t) {
+  if (t.type === 'ac') {
+    const f = (state.acFeats || []).find(f => f.properties.hex === t.id);
+    if (!f) return null;
+    const p = acDisplace(f.orig[0], f.orig[1], f.properties.alt);
+    return { lon: p.lon, lat: p.lat, orig: f.orig,
+      note: f.properties.alt.toLocaleString() + ' ft' };
+  }
+  if (t.type === 'transit') {
+    const f = (state.transitFeats || [])
+      .find(f => (f.properties.label || f.properties.route) === t.id);
+    return f && { lon: f.geometry.coordinates[0],
+      lat: f.geometry.coordinates[1], orig: f.geometry.coordinates,
+      note: f.properties.speed != null ? f.properties.speed + ' km/h' : '' };
+  }
+  const feats = t.type === 'esa' ? state.esaFeats : state.rfsFeats;
+  const idp = t.type === 'esa' ? 'guid' : 'title';
+  const f = (feats || []).find(f => f.properties[idp] === t.id);
+  return f && { lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1],
+    orig: f.geometry.coordinates, note: f.properties.status };
+}
+
+// rings only — cheap enough for paintAircraft's per-frame 3D repaints
+function trackRings() {
+  const src = map.getSource('tracked');
+  if (src) src.setData({ type: 'FeatureCollection',
+    features: TRACKS.flatMap(t => {
+      const p = trackPos(t);
+      return p ? [{ type: 'Feature', properties: {},
+        geometry: { type: 'Point', coordinates: [p.lon, p.lat] } }] : [];
+    }) });
+}
+
+const TRACK_GLYPH = { ac: '✈', transit: '🚌', esa: '⚑', rfs: '🔥' };
+function renderTracked() {
+  trackRings();
+  document.getElementById('track-note').textContent =
+    TRACKS.length ? `(${TRACKS.length})` : '';
+  const esc = s => String(s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  document.getElementById('tracklist').innerHTML = TRACKS.map((t, i) => {
+    const p = trackPos(t);
+    const k = trackKey(t);
+    return `<div class="tk ${p ? '' : 'dark'}" data-i="${i}">
+      <span>${TRACK_GLYPH[t.type] || '◎'} ${esc(t.label)}
+        <span class="k">${p ? esc(p.note || '') : 'dark'}</span></span>
+      <span><span class="tk-f ${FOLLOW === k ? 'on' : ''}" data-i="${i}"
+        title="camera follow">◉</span><span class="tk-x" data-i="${i}"
+        title="untrack">×</span></span></div>`;
+  }).join('') ||
+    '<span class="k" style="font-size:11px">nothing tracked — open a pin popup and hit ◎ track</span>';
+  document.querySelectorAll('#tracklist .tk').forEach(el => el.onclick = () => {
+    const p = trackPos(TRACKS[+el.dataset.i]);
+    if (p) map.flyTo({ center: p.orig, zoom: 12.5 });
+  });
+  document.querySelectorAll('#tracklist .tk-f').forEach(el => el.onclick = e => {
+    e.stopPropagation();
+    const k = trackKey(TRACKS[+el.dataset.i]);
+    FOLLOW = FOLLOW === k ? null : k;   // one follow at a time
+    renderTracked();
+  });
+  document.querySelectorAll('#tracklist .tk-x').forEach(el => el.onclick = e => {
+    e.stopPropagation();
+    const t = TRACKS[+el.dataset.i];
+    toggleTrack(t.type, t.id, t.label);
+  });
+}
+
+// live-path watcher, one call per fetch of that entity's source: dark /
+// reacquired alerts for movers + camera follow. Tracked incident UPD/CLR
+// alerts already come out of feedDiff via isTrackedFeed.
+const TRACK_DARK_S = { ac: 90, transit: 240, esa: 360, rfs: 360 };
+const TRACK_FEED_SRC = { ac: 'aircraft', transit: 'transit' };
+function watchTracked(type) {
+  if (REPLAY) return;
+  const now = Date.now() / 1000;
+  for (const t of TRACKS) {
+    if (t.type !== type) continue;
+    const k = trackKey(t),
+      st = trackState[k] = trackState[k] || { lastSeen: now };
+    const p = trackPos(t);
+    if (p) {
+      if (st.dark && TRACK_FEED_SRC[type])
+        feedEvent('trk', TRACK_FEED_SRC[type], { id: t.id, title: t.label,
+          cat: 'other', detail: 'reacquired', lon: p.orig[0], lat: p.orig[1] });
+      st.dark = false; st.lastSeen = now; st.lastPos = p.orig;
+      if (FOLLOW === k) map.easeTo({ center: p.orig, duration: 900 });
+    } else if (!st.dark && now - st.lastSeen > TRACK_DARK_S[type]) {
+      st.dark = true;
+      if (TRACK_FEED_SRC[type])
+        feedEvent('trk', TRACK_FEED_SRC[type], { id: t.id, title: t.label,
+          cat: 'other',
+          detail: `went dark — last seen ${Math.round((now - st.lastSeen) / 60)} min ago`,
+          lon: st.lastPos?.[0], lat: st.lastPos?.[1] });
+    }
+  }
+  renderTracked();
+}
+map.on('dragstart', () => {   // user grabbed the map: release the camera
+  if (FOLLOW) { FOLLOW = null; renderTracked(); }
+});
+
+// popup helper: same body as before plus a track/untrack button
+function popupTrack(lngLat, html, type, id, label) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  const btn = document.createElement('button');
+  btn.className = 'trk-btn';
+  const set = () =>
+    btn.textContent = isTracked(type, id) ? '◉ untrack' : '◎ track';
+  set();
+  btn.onclick = () => { toggleTrack(type, id, label); set(); };
+  div.appendChild(btn);
+  new maplibregl.Popup({ offset: 12 }).setLngLat(lngLat)
+    .setDOMContent(div).addTo(map);
+}
+
 // --- breadcrumb trails: last few minutes of movement per entity ---
 const TRANSIT_HIST = {};   // id → { mode, pts: [[lon, lat, t], …] }
 function renderTrails() {
   if (!map.getSource('trails')) return;
   const feats = [];
-  const seg = (pts, col) => {
+  const seg = (pts, col, hot) => {   // hot = tracked: brighter + wider
     for (let i = 1; i < pts.length; i++)
       feats.push({ type: 'Feature',
         geometry: { type: 'LineString',
           coordinates: [[pts[i - 1][0], pts[i - 1][1]], [pts[i][0], pts[i][1]]] },
-        properties: { col, op: 0.55 * i / pts.length } });
+        properties: { col, op: (hot ? 0.9 : 0.55) * i / pts.length,
+          w: hot ? 2.5 : 1.5 } });
   };
   for (const a of state.planes) {
     const h = AIR_HIST[a.hex];
     if (!h || h.length < 2) continue;
     const mil = ((a.dbFlags || 0) & 1) === 1;
     const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
-    seg(h, mil ? '#f7768e' : alt < 10000 ? '#e0af68' : '#7dcfff');
+    seg(h, mil ? '#f7768e' : alt < 10000 ? '#e0af68' : '#7dcfff',
+      isTracked('ac', a.hex));
   }
-  for (const v of Object.values(TRANSIT_HIST))
+  // dark tracked aircraft keep a dim ghost of their last known track
+  for (const t of TRACKS)
+    if (t.type === 'ac' && !state.planes.some(a => a.hex === t.id) &&
+        (AIR_HIST[t.id] || []).length >= 2)
+      seg(AIR_HIST[t.id], '#565f89', true);
+  for (const [id, v] of Object.entries(TRANSIT_HIST))
     if (v.pts.length >= 2)
-      seg(v.pts, v.mode === 'lightrail' ? '#bb9af7' : '#9ece6a');
+      seg(v.pts, v.mode === 'lightrail' ? '#bb9af7' : '#9ece6a',
+        isTracked('transit', id));
   map.getSource('trails').setData({ type: 'FeatureCollection', features: feats });
 }
 
@@ -1019,10 +1194,14 @@ function detectLoiter() {
     if (a.alt_baro === 'ground') continue;
     seen.add(a.hex);
     (AIR_HIST[a.hex] = AIR_HIST[a.hex] || []).push([a.lon, a.lat, now]);
-    if (AIR_HIST[a.hex].length > 15) AIR_HIST[a.hex].shift();
+    // tracked aircraft keep ~25 min of fixes vs the usual ~3
+    if (AIR_HIST[a.hex].length > (isTracked('ac', a.hex) ? 120 : 15))
+      AIR_HIST[a.hex].shift();
   }
   for (const hex of Object.keys(AIR_HIST)) // forget aircraft gone > 5 min
-    if (!seen.has(hex) && now - AIR_HIST[hex].at(-1)[2] > 300) delete AIR_HIST[hex];
+    if (!seen.has(hex) && now - AIR_HIST[hex].at(-1)[2] >
+        (isTracked('ac', hex) ? 3600 : 300))  // tracked ghosts linger 1 h
+      delete AIR_HIST[hex];
   for (const a of state.planes) {
     const h = AIR_HIST[a.hex];
     if (!h || h.length < 10 || now - h[0][2] < 100) continue; // ≥100 s of track
@@ -1328,7 +1507,7 @@ map.on('load', () => {
   map.addLayer({
     id: 'trails', type: 'line', source: 'trails',
     paint: { 'line-color': ['get', 'col'], 'line-opacity': ['get', 'op'],
-      'line-width': 1.5 }
+      'line-width': ['get', 'w'] }
   });
 
   // altitude stems: in 3D each aircraft floats at alt·tan(pitch) from its
@@ -1364,12 +1543,11 @@ map.on('load', () => {
 
   map.on('click', 'aircraft', e => {
     const p = e.features[0].properties;
-    new maplibregl.Popup({ offset: 12 })
-      .setLngLat(e.features[0].geometry.coordinates)
-      .setHTML(`<b>${p.callsign}</b> ${p.mil === 'true' ? '⚠ MIL' : ''}<br>
+    popupTrack(e.features[0].geometry.coordinates,
+      `<b>${p.callsign}</b> ${p.mil === 'true' ? '⚠ MIL' : ''}<br>
         type: ${p.type}<br>alt: ${p.alt} ft<br>
-        speed: ${p.speed} kt<br>hex: ${p.hex}`)
-      .addTo(map);
+        speed: ${p.speed} kt<br>hex: ${p.hex}`,
+      'ac', p.hex, p.callsign);
   });
   map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
@@ -1398,6 +1576,17 @@ map.on('load', () => {
       'text-halo-color': '#1a1b26', 'text-halo-width': 1.2 }
   });
   renderZones();
+
+  // tracked-entity highlight rings: hollow amber, screen-round even in 3D
+  map.addSource('tracked', { type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'tracked', type: 'circle', source: 'tracked',
+    paint: { 'circle-radius': 15, 'circle-color': 'rgba(0,0,0,0)',
+      'circle-stroke-color': '#e0af68', 'circle-stroke-width': 2,
+      'circle-stroke-opacity': 0.9, 'circle-pitch-alignment': 'viewport' }
+  });
+  renderTracked();
 
   // polygon-zone draft line while drawing
   map.addSource('draft', { type: 'geojson',
@@ -1502,12 +1691,11 @@ map.on('load', () => {
   map.on('mouseleave', 'esa-clusters', () => map.getCanvas().style.cursor = '');
   map.on('click', 'esa', e => {
     const p = e.features[0].properties;
-    new maplibregl.Popup({ offset: 12 })
-      .setLngLat(e.features[0].geometry.coordinates)
-      .setHTML(`<b>${p.title}</b><br>
+    popupTrack(e.features[0].geometry.coordinates,
+      `<b>${p.title}</b><br>
         type: ${(CAT[p.cat] || CAT.other).label}<br>status: ${p.status}<br>
-        agency: ${p.agency}<br>suburb: ${p.suburb}<br>updated: ${p.updated}`)
-      .addTo(map);
+        agency: ${p.agency}<br>suburb: ${p.suburb}<br>updated: ${p.updated}`,
+      'esa', p.guid, p.title);
   });
   map.on('mouseenter', 'esa', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'esa', () => map.getCanvas().style.cursor = '');
@@ -1552,11 +1740,10 @@ map.on('load', () => {
   });
   map.on('click', 'rfs', e => {
     const p = e.features[0].properties;
-    new maplibregl.Popup({ offset: 12 })
-      .setLngLat(e.features[0].geometry.coordinates)
-      .setHTML(`<b>${p.title}</b> (NSW RFS)<br>alert: ${p.category}<br>
-        status: ${p.status}<br>type: ${p.rfstype}<br>size: ${p.size}`)
-      .addTo(map);
+    popupTrack(e.features[0].geometry.coordinates,
+      `<b>${p.title}</b> (NSW RFS)<br>alert: ${p.category}<br>
+        status: ${p.status}<br>type: ${p.rfstype}<br>size: ${p.size}`,
+      'rfs', p.title, p.title);
   });
   map.on('mouseenter', 'rfs', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'rfs', () => map.getCanvas().style.cursor = '');
@@ -1638,14 +1825,13 @@ map.on('load', () => {
     const head = p.mode === 'lightrail'
       ? (p.label || 'light rail')
       : (p.route ? 'Route ' + p.route : 'bus');
-    new maplibregl.Popup({ offset: 12 })
-      .setLngLat(e.features[0].geometry.coordinates)
-      .setHTML(`<b>${head}</b> (${p.mode === 'lightrail' ? 'light rail' : 'bus'})<br>
+    popupTrack(e.features[0].geometry.coordinates,
+      `<b>${head}</b> (${p.mode === 'lightrail' ? 'light rail' : 'bus'})<br>
         ${p.label ? 'vehicle: ' + p.label + '<br>' : ''}
         ${p.speed != null ? 'speed: ' + p.speed + ' km/h<br>' : ''}
         ${p.occupancy ? 'occupancy: ' + p.occupancy + '<br>' : ''}
-        updated: ${age}`)
-      .addTo(map);
+        updated: ${age}`,
+      'transit', p.label || p.route, head + (p.label ? ' · ' + p.label : ''));
   });
   map.on('mouseenter', 'transit', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'transit', () => map.getCanvas().style.cursor = '');
@@ -2125,6 +2311,7 @@ async function fetchAircraft() {
     detectLoiter();
     geofence();
     renderTrails();
+    watchTracked('ac');
     setStatus(true, `updated ${new Date().toLocaleTimeString()}`);
     mark('air', true);
   } catch (e) {
@@ -2162,6 +2349,7 @@ function paintAircraft() {  // geometry only — cheap enough to run per frame
   map.getSource('aircraft').setData({ type: 'FeatureCollection', features: feats });
   map.getSource('ac-stems').setData({ type: 'FeatureCollection', features: stems });
   acStemCount = stems.length;
+  trackRings();   // highlight rings ride the same displaced positions
 }
 
 // keep the displacement honest while the camera tilts/rotates
@@ -2336,6 +2524,7 @@ async function fetchIncidents() {
       detail: f.properties.suburb,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
     correlate();
+    watchTracked('esa');
     mark('esa', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -2718,6 +2907,7 @@ async function fetchRfs() {
       detail: f.properties.category,
       lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] })));
     correlate();
+    watchTracked('rfs');
     mark('rfs', true);
   } catch (e) {
     count.textContent = '(needs serve.py)';
@@ -2774,14 +2964,18 @@ async function fetchTransit() {
       const [lon, lat] = f.geometry.coordinates;
       const last = h.pts.at(-1);
       if (!last || last[0] !== lon || last[1] !== lat) h.pts.push([lon, lat, now]);
-      if (h.pts.length > 16) h.pts.shift();
+      if (h.pts.length > (isTracked('transit', id) ? 120 : 16)) h.pts.shift();
     });
+    state.transitFeats = geo.features;
     map.getSource('transit').setData(geo);
     count.textContent = `(${geo.features.length})`;
     if (wasReplay) return;
     for (const k of Object.keys(TRANSIT_HIST))   // forget vanished vehicles
-      if (now - TRANSIT_HIST[k].pts.at(-1)[2] > 300) delete TRANSIT_HIST[k];
+      if (now - TRANSIT_HIST[k].pts.at(-1)[2] >
+          (isTracked('transit', k) ? 3600 : 300))
+        delete TRANSIT_HIST[k];
     renderTrails();
+    watchTracked('transit');
     mark('transit', true);
   } catch (e) {
     if (wasReplay) return;

@@ -8,7 +8,7 @@ data source is free.
 Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the
 hundred-eyed watchman of Greek myth.
 
-![version](https://img.shields.io/badge/version-0.06-blue)
+![version](https://img.shields.io/badge/version-0.07-blue)
 ![status](https://img.shields.io/badge/status-beta-orange)
 
 ## What it shows
@@ -51,6 +51,9 @@ hundred-eyed watchman of Greek myth.
   [Nominatim](https://nominatim.openstreetmap.org), biased to the Canberra
   region) and fly the map to it with a marker.
 - **Basemaps** — dark (CARTO), street (OSM), or satellite (Esri imagery).
+- **Entity tracking** — pin an aircraft, bus, or incident from its popup:
+  highlight ring, longer trail, camera follow, and feed alerts when it
+  changes status or goes dark.
 
 ## Running it
 
