@@ -103,7 +103,7 @@ def walk(o):
 
 def main():
     # OFM 403s urllib's default UA (same story as Essential Energy's KML)
-    req = urllib.request.Request(SRC, headers={"User-Agent": "argus/0.08"})
+    req = urllib.request.Request(SRC, headers={"User-Agent": "argus/0.09"})
     style = json.loads(urllib.request.urlopen(req, timeout=20).read())
     out = {"sources": style["sources"], "layers": []}
     out["sources"].get("openmaptiles", {})["attribution"] = ATTRIBUTION

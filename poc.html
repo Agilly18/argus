@@ -10,7 +10,9 @@
 <style>
   :root {
     --panel-w: 400px;  /* #timebar's left offset derives from this */
-    --bg: #1a1b26; --panel: #24283bee; --fg: #c0caf5; --dim: #565f89;
+    /* --dim lightened 565f89→737aa2 (TN comment-light): old value was ~3.2:1
+       on the panel bg — below AA for the small text it labels */
+    --bg: #1a1b26; --panel: #24283bee; --fg: #c0caf5; --dim: #737aa2;
     --cyan: #7dcfff; --amber: #e0af68; --red: #f7768e; --green: #9ece6a;
   }
   html, body { margin: 0; height: 100%; background: var(--bg);
@@ -32,8 +34,15 @@
     align-items: center; min-width: 80px; }
   #tb-slider { width: 100%; accent-color: var(--cyan); margin: 0; }
   #timebar.replay #tb-slider { accent-color: var(--amber); }
-  #tb-activity { position: absolute; left: 0; right: 0; bottom: -4px;
-    height: 4px; border-radius: 2px; pointer-events: none; opacity: 0.9; }
+  /* the heat strip doubles as a scrub surface — click an interesting hour */
+  #tb-activity { position: absolute; left: 0; right: 0; bottom: -5px;
+    height: 5px; border-radius: 2px; cursor: pointer; opacity: 0.9; }
+  #tb-activity:hover { height: 7px; bottom: -7px; }
+  /* control clusters read as groups, not a button soup */
+  .tb-ctl { display: flex; gap: 6px; align-items: center;
+    padding-right: 10px; border-right: 1px solid #ffffff14; }
+  #tb-label { border-bottom: 1px dotted var(--dim); cursor: text; }
+  #tb-label:hover { color: var(--fg); }
   #tb-ticks { position: absolute; left: 0; right: 0; top: -6px; height: 6px;
     pointer-events: none; }
   .tb-tick { position: absolute; top: 0; width: 3px; height: 6px;
@@ -142,12 +151,42 @@
     margin-top: 4px; }
   #health { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
     font-size: 10px; color: var(--dim); }
-  #health .hs { display: flex; align-items: center; gap: 3px; cursor: default; }
+  #health { cursor: pointer; }
+  #health .hs { display: flex; align-items: center; gap: 3px; cursor: pointer; }
+  #health.open .hs { width: 100%; }
+  #health .hs em { font-style: normal; color: var(--dim); margin-left: auto; }
   #health .hs i { width: 7px; height: 7px; border-radius: 50%;
     background: #565f89; display: inline-block; }
   .sec-h { cursor: pointer; user-select: none; }
   .sec-h:hover .k { color: var(--fg); }
   .sec.closed .sec-b { display: none; }
+  /* thematic layer groups inside the layers section */
+  .lg { margin: 6px 0 2px; }
+  .lg-h { cursor: pointer; user-select: none; display: flex;
+    align-items: center; gap: 6px; }
+  .lg-h .k { font-size: 11px; letter-spacing: 0.08em; }
+  .lg-h:hover .k { color: var(--fg); }
+  .lg-h .lg-all { margin-left: auto; font-size: 10px; padding: 0 6px; }
+  .lg.closed .lg-b { display: none; }
+  .lg-b { margin-left: 2px; }
+  /* layer-glyph swatches: same visual language as the map pins */
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 50%;
+    vertical-align: -1px; margin-right: 2px; }
+  .sw.ring { background: var(--bg); border: 2px solid; width: 8px; height: 8px; }
+  .sw.line { height: 3px; border-radius: 2px; vertical-align: 2px; }
+  img.sw { border-radius: 0; width: 15px; height: 15px; vertical-align: -3px; }
+  /* desktop panel collapse */
+  #panel-hide { position: absolute; top: 10px; right: 10px; padding: 1px 7px; }
+  #panel-show { display: none; position: absolute; z-index: 5; top: 12px;
+    left: 12px; padding: 6px 10px; cursor: pointer; background: var(--panel);
+    border: 1px solid var(--dim); border-radius: 8px; color: var(--cyan); }
+  body.nopanel #panel { display: none; }
+  body.nopanel #panel-show { display: block; }
+  @media (max-width: 700px) {
+    #panel-hide, #panel-show { display: none !important; }
+    /* map-only is a desktop idea — never strand the mobile sheet hidden */
+    body.nopanel #panel { display: block; }
+  }
 
   #pinleg-h { cursor: pointer; user-select: none; }
   #pinleg { display: none; }
@@ -219,6 +258,10 @@
   .maplibregl-popup-content { background: var(--panel); color: var(--fg);
     font-family: monospace; font-size: 12px; border: 1px solid var(--dim); }
   .maplibregl-popup-tip { border-top-color: var(--panel) !important; }
+  /* hover tooltip: one-liner, no chrome, never eats the mouse */
+  .hovertip { pointer-events: none; }
+  .hovertip .maplibregl-popup-content { padding: 3px 8px; font-size: 11px;
+    color: var(--fg); white-space: nowrap; }
 
   /* attribution: dark pill instead of the stock white bar */
   .maplibregl-ctrl-attrib { background: var(--panel) !important;
@@ -248,8 +291,9 @@
 
 <div id="panel">
   <div id="sheet-handle" title="tap to expand"></div>
+  <button id="panel-hide" title="hide panel — map-only view">⟨</button>
   <h1>ARGUS</h1>
-  <div class="sub">Canberra · all-source · v0.08<span class="beta">BETA</span></div>
+  <div class="sub">Canberra · all-source · v0.09<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>
@@ -284,28 +328,48 @@
         <button id="tog-3d" title="tilt into 3D terrain (drag with right mouse / two fingers to look around)">◱ 3D</button>
         <button id="windy-pop" title="open windy.com at this view">windy ↗</button>
       </div>
-      <label><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-trails" checked> trails</label>
-      <label><input type="checkbox" id="tog-radar" checked> rain radar</label>
-      <label><input type="checkbox" id="tog-wind"> wind field</label>
-      <label title="animated particle flow from live wind data"><input type="checkbox" id="tog-flow"> wind flow</label>
-      <label title="live webcam stills — imagery by Windy"><input type="checkbox" id="tog-cams"> webcams <span id="cams-note" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-suburbs" checked> suburb boundaries</label>
-      <label><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-heat"> incident heat (72 h)</label>
-      <label><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-closures" checked> road closures <span id="closures-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-airq" checked> air quality <span id="airq-count" style="color:var(--dim)"></span></label>
-      <label><input type="checkbox" id="tog-quakes" checked> earthquakes <span id="quakes-count" style="color:var(--dim)"></span></label>
-      <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
-      <div class="row" id="pinleg-h" title="what the incident pin glyphs mean">
-        <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
-      <div id="pinleg"></div>
-      <div id="aclist"></div>
+      <div class="lg" data-lg="air">
+        <div class="row lg-h"><span class="k">air</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="lg-b">
+          <label><span class="sw" style="background:var(--cyan); border-radius:0; clip-path:polygon(50% 0,100% 100%,0 100%)"></span><input type="checkbox" id="tog-ac" checked> aircraft <span id="ac-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw line" style="background:var(--cyan); width:14px; opacity:0.6"></span><input type="checkbox" id="tog-trails" checked> trails</label>
+          <div class="legend"><b class="lo">▲ &lt;10k ft</b><b class="hi">▲ ≥10k ft</b><b class="ml">▲ military</b></div>
+          <div id="aclist"></div>
+        </div>
+      </div>
+      <div class="lg" data-lg="hazard">
+        <div class="row lg-h"><span class="k">fire &amp; hazard</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="lg-b">
+          <label><span class="sw" id="sw-esa"></span><input type="checkbox" id="tog-esa" checked> esa incidents <span id="esa-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw" style="background:radial-gradient(circle, var(--red), transparent)"></span><input type="checkbox" id="tog-heat"> incident heat (72 h)</label>
+          <label><span class="sw" style="background:#ff9e64"></span><input type="checkbox" id="tog-fires" checked> fire hotspots <span id="fires-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw" id="sw-rfs"></span><input type="checkbox" id="tog-rfs" checked> nsw rfs <span id="rfs-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw" style="background:var(--green)"></span><input type="checkbox" id="tog-airq" checked> air quality <span id="airq-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw ring" style="border-color:#bb9af7"></span><input type="checkbox" id="tog-quakes" checked> earthquakes <span id="quakes-count" style="color:var(--dim)"></span></label>
+          <div class="row" id="pinleg-h" title="what the incident pin glyphs mean">
+            <span class="k">pin legend</span><span class="k" id="pinleg-a">▸</span></div>
+          <div id="pinleg"></div>
+        </div>
+      </div>
+      <div class="lg" data-lg="infra">
+        <div class="row lg-h"><span class="k">infrastructure</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="lg-b">
+          <label><span class="sw ring" style="border-color:var(--red)"></span><input type="checkbox" id="tog-power" checked> power outages <span id="power-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw" style="background:var(--green)"></span><input type="checkbox" id="tog-transit" checked> transit <span id="transit-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw" id="sw-closures"></span><input type="checkbox" id="tog-closures" checked> road closures <span id="closures-count" style="color:var(--dim)"></span></label>
+          <label><span class="sw line" style="background:linear-gradient(90deg,var(--green),var(--amber),var(--red)); width:14px"></span><input type="checkbox" id="tog-traffic"> traffic flow <span id="traffic-note" style="color:var(--dim)"></span></label>
+          <label title="live webcam stills — imagery by Windy"><span class="sw ring" style="border-color:var(--cyan)"></span><input type="checkbox" id="tog-cams"> webcams <span id="cams-note" style="color:var(--dim)"></span></label>
+        </div>
+      </div>
+      <div class="lg" data-lg="wx">
+        <div class="row lg-h"><span class="k">weather &amp; reference</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="lg-b">
+          <label><span class="sw" style="background:#7aa2f7; opacity:0.7"></span><input type="checkbox" id="tog-radar" checked> rain radar</label>
+          <label><span class="sw" style="background:var(--cyan); border-radius:0; clip-path:polygon(0 40%,70% 40%,70% 15%,100% 50%,70% 85%,70% 60%,0 60%)"></span><input type="checkbox" id="tog-wind"> wind field</label>
+          <label title="animated particle flow from live wind data"><span class="sw line" style="background:var(--cyan); width:14px; opacity:0.5"></span><input type="checkbox" id="tog-flow"> wind flow</label>
+          <label><span class="sw line" style="background:#3b4261; width:14px"></span><input type="checkbox" id="tog-suburbs" checked> suburb boundaries</label>
+        </div>
+      </div>
     </div>
   </div>
   <hr>
@@ -345,11 +409,14 @@
   <div id="health"></div>
   <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
 </div>
+<div id="panel-show" title="show panel">⟩ ARGUS</div>
 
 <div id="timebar" class="live">
-  <button id="tb-live" title="jump to live">● LIVE</button>
-  <button id="tb-play" title="replay forward from here">▶</button>
-  <button id="tb-speed" title="playback speed (replay minutes per second)">1m/s</button>
+  <span class="tb-ctl">
+    <button id="tb-live" title="jump to live">● LIVE</button>
+    <button id="tb-play" title="replay forward from here">▶</button>
+    <button id="tb-speed" title="playback speed (replay minutes per second)">1m/s</button>
+  </span>
   <span class="tb-nudge">
     <button class="tb-n" data-d="-3600" title="back 1 hour (shift+←)">−1h</button>
     <button class="tb-n" data-d="-300" title="back 5 min (←)">−5m</button>
@@ -557,6 +624,9 @@ function mark(src, ok) {
   if (ok) h.lastOk = Date.now(); else h.lastErr = Date.now();
   renderHealth();
 }
+// click flips compact dots ↔ full status rows (hover titles are useless on
+// touch, and undiscoverable everywhere)
+let healthOpen = false;
 function renderHealth() {
   const now = Date.now();
   document.getElementById('health').innerHTML =
@@ -571,9 +641,15 @@ function renderHealth() {
       const ageTxt = age == null ? '' :
         ', last ok ' + (age < 90 ? age + 's' : Math.round(age / 60) + 'm') + ' ago';
       return `<span class="hs" title="${n}: ${t}${ageTxt}">` +
-        `<i style="background:${col}"></i>${n}</span>`;
+        `<i style="background:${col}"></i>${n}` +
+        (healthOpen ? `<em>${t}${ageTxt}</em>` : '') + `</span>`;
     }).join('');
 }
+document.getElementById('health').onclick = () => {
+  healthOpen = !healthOpen;
+  document.getElementById('health').classList.toggle('open', healthOpen);
+  renderHealth();
+};
 setInterval(renderHealth, 10000);
 
 // --- incident taxonomy: category from title keywords → colour + icon ---
@@ -1458,9 +1534,11 @@ map.on('load', () => {
   map.addImage('rfs-watch',     incidentIcon('fire', '#e0af68', '#c0caf5'));
   map.addImage('rfs-advice',    incidentIcon('fire', '#7dcfff', '#c0caf5'));
   map.addImage('rfs-other',     incidentIcon('fire', '#565f89', '#c0caf5'));
-  // road closures: amber bar = closed now, grey = starts within 24 h
+  // road closures: amber bar = closed now, grey = starts within 24 h,
+  // red = emergency/weather closure (the only kind that should shout)
   map.addImage('closure-on',    incidentIcon('road'));
   map.addImage('closure-soon',  incidentIcon('road', '#565f89'));
+  map.addImage('closure-emerg', incidentIcon('road', '#f7768e'));
 
   initVectorBase();   // Tokyo-Night vector basemap, injected under the rasters
 
@@ -1765,11 +1843,19 @@ map.on('load', () => {
     id: 'power', type: 'circle', source: 'power',
     filter: ['==', ['geometry-type'], 'Point'],
     paint: {
-      'circle-radius': 5.5,
+      // scheduled works shrink into the background at city zoom; live
+      // outages keep full size everywhere (zoom must drive the top-level
+      // expression — maplibre rejects interpolate-inside-case)
+      'circle-radius': ['interpolate', ['linear'], ['zoom'],
+        11, ['case', ['==', ['get', 'sev'], 'scheduled'], 3, 5.5], 13.5, 5.5],
       'circle-color': '#1a1b26',
-      'circle-opacity': 0.85,
-      'circle-stroke-width': 2.5,
-      'circle-stroke-color': sevColour
+      'circle-opacity': ['interpolate', ['linear'], ['zoom'],
+        11, ['case', ['==', ['get', 'sev'], 'scheduled'], 0.45, 0.85], 13.5, 0.85],
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'],
+        11, ['case', ['==', ['get', 'sev'], 'scheduled'], 1.2, 2.5], 13.5, 2.5],
+      'circle-stroke-color': sevColour,
+      'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'],
+        11, ['case', ['==', ['get', 'sev'], 'scheduled'], 0.5, 1], 13.5, 1]
     }
   }, 'esa');
   map.on('click', 'power', e => {
@@ -1794,7 +1880,10 @@ map.on('load', () => {
   map.addLayer({
     id: 'transit', type: 'circle', source: 'transit',
     paint: {
-      'circle-radius': 6,
+      // buses are corridor-scale detail: small at territory zoom so they
+      // don't compete with incident pins, full size once zoomed in
+      'circle-radius': ['interpolate', ['linear'], ['zoom'],
+        10, 2.5, 12, 4, 13.5, 6],
       'circle-color': ['match', ['get', 'mode'],
         'lightrail', '#bb9af7', '#9ece6a'],
       // stale positions fade (age in seconds, stamped at fetch time)
@@ -1806,12 +1895,14 @@ map.on('load', () => {
   });
   map.addLayer({
     id: 'transit-label', type: 'symbol', source: 'transit',
+    // route numbers only once you're close enough to care, and colliding
+    // labels cull rather than stack — kills the numeric confetti at city zoom
+    minzoom: 12.5,
     layout: {
       'text-field': ['coalesce', ['get', 'route'], ['get', 'label'], ''],
       'text-font': ['Open Sans Regular'],
       'text-size': 10,
-      'text-offset': [0, -1.4],
-      'text-allow-overlap': true
+      'text-offset': [0, -1.4]
     },
     paint: {
       'text-color': '#bb9af7',
@@ -1836,18 +1927,38 @@ map.on('load', () => {
   map.on('mouseenter', 'transit', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'transit', () => map.getCanvas().style.cursor = '');
 
-  // Road closures: no-entry pins, dimmed while the closure is still upcoming
+  // Road closures: ~90 of these are routine roadworks — background texture,
+  // not events. Routine pins shrink/dim at city zoom and collision-cull so
+  // they thin out instead of carpeting the map; emergency/weather closures
+  // ride a separate always-drawn red layer so they can never be buried.
+  const SIG_CLOSURE = ['match', ['get', 'ctype'],
+    ['emergency', 'inclementWeather'], true, false];
   map.addSource('closures', { type: 'geojson',
     data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({
     id: 'closures', type: 'symbol', source: 'closures',
+    filter: ['!', SIG_CLOSURE],
     layout: {
       'icon-image': ['case', ['to-boolean', ['get', 'active']],
         'closure-on', 'closure-soon'],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.55, 13.5, 1],
+      'icon-padding': 1
+    },
+    paint: {
+      'icon-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 13.5, 1]
+    }
+  });
+  map.addLayer({
+    id: 'closures-sig', type: 'symbol', source: 'closures',
+    filter: SIG_CLOSURE,
+    layout: {
+      'icon-image': ['case', ['to-boolean', ['get', 'active']],
+        'closure-emerg', 'closure-soon'],
+      'icon-size': 1.15,
       'icon-allow-overlap': true
     }
   });
-  map.on('click', 'closures', e => {
+  const closurePopup = e => {
     const p = e.features[0].properties;
     const fmt = t => t ? new Date(+t).toLocaleString([],
       { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
@@ -1859,9 +1970,12 @@ map.on('load', () => {
         ${p.reason ? 'why: ' + p.reason + '<br>' : ''}
         type: ${p.ctype}<br>from: ${fmt(p.start)}<br>until: ${fmt(p.end)}`)
       .addTo(map);
-  });
-  map.on('mouseenter', 'closures', () => map.getCanvas().style.cursor = 'pointer');
-  map.on('mouseleave', 'closures', () => map.getCanvas().style.cursor = '');
+  };
+  for (const id of ['closures', 'closures-sig']) {
+    map.on('click', id, closurePopup);
+    map.on('mouseenter', id, () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', id, () => map.getCanvas().style.cursor = '');
+  }
 
   // Air quality: three fixed stations; disc colour = AQI band, number = AQI
   map.addSource('airq', { type: 'geojson',
@@ -1979,6 +2093,34 @@ map.on('load', () => {
   renderHealth();
   renderStress();   setInterval(renderStress, 60000); // decay 'recent alerts'
   initTimebar();
+
+  // hover tooltips: identify a pin without spending a click — one shared
+  // popup, one-line summary per layer; the click popup stays the full card
+  const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false,
+    offset: 10, className: 'hovertip', maxWidth: '260px' });
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const TIP_TEXT = {
+    esa: p => `${p.title} · ${p.status}`,
+    rfs: p => `${p.title} · ${p.category}`,
+    fires: p => `satellite hotspot · FRP ${p.frp}`,
+    power: p => `${p.otype} outage (${p.sev}) · ${p.customers} customers`,
+    transit: p => p.mode === 'lightrail' ? (p.label || 'light rail')
+      : `route ${p.route || '?'}`,
+    closures: p => `${p.roads || p.suburb || 'closure'} · ${p.ctype}`,
+    'closures-sig': p => `${p.roads || p.suburb || 'closure'} · ${p.ctype}`,
+    airq: p => `${p.station} · AQI ${p.aqi}`,
+    quakes: p => `M${p.mag} · ${p.place}`
+  };
+  for (const [layer, text] of Object.entries(TIP_TEXT)) {
+    map.on('mousemove', layer, e => {
+      const f = e.features[0];
+      const pos = f.geometry.type === 'Point'
+        ? f.geometry.coordinates : e.lngLat;
+      tip.setLngLat(pos).setHTML(esc(text(f.properties))).addTo(map);
+    });
+    map.on('mouseleave', layer, () => tip.remove());
+    map.on('click', layer, () => tip.remove());   // full popup takes over
+  }
 });
 
 // --- time slider ------------------------------------------------------------
@@ -2203,6 +2345,14 @@ function initTimebar() {
     if (v >= tb.max - 30) goLive();       // snapped to the live edge
     else enterReplay(v);
   };
+  // heat strip scrub: click a busy hour to jump straight to it
+  document.getElementById('tb-activity').onclick = e => {
+    if (!tb.max || slider.disabled) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const t = tb.min + (e.clientX - r.left) / r.width * (tb.max - tb.min);
+    slider.value = Math.round(t);
+    slider.dispatchEvent(new Event('input'));
+  };
   document.getElementById('tb-live').onclick = goLive;
   initPlayback();
   initPrecision();
@@ -2234,11 +2384,54 @@ document.querySelectorAll('.sec').forEach(sec => {
   };
 });
 
+// layer groups: same collapse idiom as sections, plus an all/none flipper
+const lgClosed = new Set(JSON.parse(localStorage.getItem('copLgClosed') || '[]'));
+document.querySelectorAll('.lg').forEach(lg => {
+  const arrow = () => lg.querySelector('.lg-a').textContent =
+    lg.classList.contains('closed') ? '▸' : '▾';
+  if (lgClosed.has(lg.dataset.lg)) lg.classList.add('closed');
+  arrow();
+  lg.querySelector('.lg-h').onclick = () => {
+    lg.classList.toggle('closed');
+    lgClosed[lg.classList.contains('closed') ? 'add' : 'delete'](lg.dataset.lg);
+    localStorage.setItem('copLgClosed', JSON.stringify([...lgClosed]));
+    arrow();
+  };
+  lg.querySelector('.lg-all').onclick = e => {
+    e.stopPropagation();     // don't also collapse the group
+    const boxes = [...lg.querySelectorAll('.lg-b input[type=checkbox]')];
+    const target = boxes.some(b => !b.checked);
+    for (const b of boxes) {
+      if (b.checked === target) continue;
+      b.checked = target;
+      b.dispatchEvent(new Event('change'));
+    }
+  };
+});
+
+// desktop map-only view: hide the panel, timebar stretches into the space
+const panelHidden = h => {
+  document.body.classList.toggle('nopanel', h);
+  document.documentElement.style.setProperty('--panel-w', h ? '0px' : '400px');
+  localStorage.setItem('copPanelHide', h ? '1' : '0');
+};
+document.getElementById('panel-hide').onclick = () => panelHidden(true);
+document.getElementById('panel-show').onclick = () => panelHidden(false);
+if (localStorage.getItem('copPanelHide') === '1' && innerWidth > 700)
+  panelHidden(true);
+
 // pin legend: render the actual canvas glyphs as inline images
 function iconURL(cat, fill, stroke) {
   const c = document.createElement('canvas'); c.width = c.height = 30;
   c.getContext('2d').putImageData(incidentIcon(cat, fill, stroke), 0, 0);
   return c.toDataURL();
+}
+// glyph-pin layers get their real map icon as the panel swatch
+for (const [id, args] of Object.entries({
+  'sw-esa': ['other'], 'sw-rfs': ['fire', '#e0af68', '#c0caf5'],
+  'sw-closures': ['road'] })) {
+  document.getElementById(id).style.background =
+    `center / contain no-repeat url(${iconURL(...args)})`;
 }
 document.getElementById('pinleg').innerHTML =
   ['crash', 'fire', 'burn', 'medical', 'rescue', 'hazmat', 'storm', 'other']
@@ -2868,8 +3061,10 @@ document.getElementById('tog-transit').onchange = e => {
   for (const id of ['transit', 'transit-label'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
 };
-document.getElementById('tog-closures').onchange = e =>
-  map.setLayoutProperty('closures', 'visibility', e.target.checked ? 'visible' : 'none');
+document.getElementById('tog-closures').onchange = e => {
+  for (const id of ['closures', 'closures-sig'])
+    map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+};
 document.getElementById('tog-airq').onchange = e => {
   for (const id of ['airq', 'airq-label'])
     map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');

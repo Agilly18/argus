@@ -8,7 +8,7 @@ data source is free.
 Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the
 hundred-eyed watchman of Greek myth.
 
-![version](https://img.shields.io/badge/version-0.08-blue)
+![version](https://img.shields.io/badge/version-0.09-blue)
 ![status](https://img.shields.io/badge/status-beta-orange)
 
 ## What it shows
