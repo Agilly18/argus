@@ -249,7 +249,7 @@
 <div id="panel">
   <div id="sheet-handle" title="tap to expand"></div>
   <h1>ARGUS</h1>
-  <div class="sub">Canberra · all-source · v0.07<span class="beta">BETA</span></div>
+  <div class="sub">Canberra · all-source · v0.08<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>
@@ -2560,6 +2560,23 @@ async function initVectorBase() {
       map.addLayer(lyr, 'base');       // insert below the raster basemaps
       VT_IDS.push(lyr.id);
     }
+    // 3D buildings: extrude the same OFM footprints the dark+ style draws
+    // flat — OSM heights where tagged (render_height), ~one storey default
+    // elsewhere. Above the rasters and NOT in VT_IDS: rides the ◱ 3D toggle,
+    // not the basemap radios, so it works over any base.
+    map.addLayer({
+      id: 'buildings-3d', type: 'fill-extrusion', source: 'openmaptiles',
+      'source-layer': 'building', minzoom: 13,
+      layout: { visibility: 'none' },
+      paint: {
+        'fill-extrusion-color': ['interpolate', ['linear'],
+          ['coalesce', ['get', 'render_height'], 8],
+          0, '#292e42', 60, '#414868'],
+        'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
+        'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
+        'fill-extrusion-opacity': 0.85
+      }
+    }, 'suburbs-line');
     applyBasemap(document.querySelector('#basemap input:checked').value);
   } catch (e) {
     // no vt-style.json (or OFM down): raster fallback, grey the option out
@@ -2609,6 +2626,8 @@ const btn3d = document.getElementById('tog-3d');
 btn3d.onclick = () => {
   const on = !map.getTerrain();
   map.setTerrain(on ? { source: 'dem', exaggeration: 1.3 } : null);
+  if (map.getLayer('buildings-3d'))   // absent if vt-style.json failed
+    map.setLayoutProperty('buildings-3d', 'visibility', on ? 'visible' : 'none');
   map.easeTo({ pitch: on ? 55 : 0, duration: 800 });
   btn3d.classList.toggle('on', on);
 };
