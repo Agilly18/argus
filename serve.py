@@ -29,6 +29,7 @@ Serves the static page and relays two feeds a browser can't reach directly:
 Run:  python3 serve.py  →  http://localhost:8899
 """
 import csv
+import functools
 import gzip
 import hashlib
 import io
@@ -51,6 +52,11 @@ TILE_CACHE_SECONDS = 120  # traffic tiles: save free-tier quota on map pans
 
 _cache = {"time": 0.0, "body": b"[]"}
 _tile_cache = {}
+
+# How long a cached body may keep being served after its upstream refresh
+# fails. Past this the endpoint errors again, so a feed that is genuinely
+# dead surfaces as dead instead of quietly serving history forever.
+STALE_MAX_SECONDS = 3600
 
 
 def load_env():
@@ -78,6 +84,83 @@ def _cfg(key, default=None):
 TOMTOM_KEY = _env.get("TOMTOM_API_KEY", "")
 FIRMS_KEY = _env.get("FIRMS_MAP_KEY", "")
 
+# --- cost + abuse guards -----------------------------------------------------
+# Two things behind this server cost something per request: TomTom traffic
+# tiles (metered key, daily free-tier allowance) and the Ollama SITREP (GPU
+# time on the desktop). Anyone who can reach Argus can spend both, so both
+# get a budget and a per-IP rate limit. These are process-local in-memory
+# guards that reset on restart -- they are NOT billing caps. Set a
+# provider-side budget for that.
+TOMTOM_DAILY_TILE_BUDGET = int(_cfg("TOMTOM_DAILY_TILE_BUDGET", "40000"))
+TOMTOM_TILE_CACHE_MAX = int(_cfg("TOMTOM_TILE_CACHE_MAX", "4000"))
+GEOCODE_CACHE_MAX = int(_cfg("GEOCODE_CACHE_MAX", "2000"))
+RATELIMIT_TOMTOM_PER_MIN = int(_cfg("RATELIMIT_TOMTOM_PER_MIN", "240"))
+RATELIMIT_SITREP_PER_MIN = int(_cfg("RATELIMIT_SITREP_PER_MIN", "6"))
+RATELIMIT_GEOCODE_PER_MIN = int(_cfg("RATELIMIT_GEOCODE_PER_MIN", "20"))
+# Trust a proxy-supplied client IP only from these peers. The Cloudflare
+# tunnel connects from loopback, so without this every tunnelled request
+# shares one bucket and the per-IP limit means nothing.
+TRUSTED_PROXY_PEERS = set(
+    p.strip() for p in _cfg("TRUSTED_PROXY_PEERS", "127.0.0.1,::1").split(",")
+    if p.strip())
+
+_guard_lock = threading.Lock()
+_ratelimit = {}
+
+
+def _prune_cache(cache, cap):
+    """Drop oldest entries from a {key: (time, value)} cache past `cap`.
+    These are keyed by caller-controlled input (tile coords, search text),
+    so on a reachable instance they would otherwise grow without bound."""
+    if len(cache) <= cap:
+        return
+    doomed = sorted(cache, key=lambda k: cache[k][0])[:len(cache) - cap]
+    for key in doomed:
+        cache.pop(key, None)
+
+
+def rate_limited(bucket, client, per_min):
+    """True once `client` has used its allowance for the current minute.
+    Per-IP, per-process, in-memory: resets on restart, does nothing about a
+    distributed source. It exists to stop one bored visitor draining a
+    metered quota, not as a security control. 0 or less disables it."""
+    if per_min <= 0:
+        return False
+    window = int(time.time() // 60)
+    with _guard_lock:
+        for key in [k for k in _ratelimit if k[2] < window - 1]:
+            _ratelimit.pop(key, None)
+        key = (bucket, client, window)
+        count = _ratelimit.get(key, 0) + 1
+        _ratelimit[key] = count
+    return count > per_min
+
+
+def stale_ok(cache, label):
+    """Serve the last good body when an upstream refresh fails.
+
+    Every feed below caches into a {"time", "body"} dict and re-fetches once
+    its TTL passes; an upstream blip used to propagate out as a 502 and the
+    layer would empty. Falling back to the cached body keeps the picture up
+    while the feed recovers, bounded by STALE_MAX_SECONDS so a dead feed is
+    still eventually visible as dead. The history recorder dedupes by hash,
+    so a stale body is not written as a new snapshot."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                age = time.time() - cache["time"]
+                if cache["time"] and age < STALE_MAX_SECONDS:
+                    print(f"[argus] {label} upstream failed ({exc}); "
+                          f"serving {int(age)}s-old cache", flush=True)
+                    return cache["body"]
+                raise
+        return wrapper
+    return deco
+
+
 # west,south,east,north box around the ACT and surrounds
 FIRMS_BBOX = "148.2,-36.2,150.0,-34.4"
 FIRMS_SENSORS = ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT")
@@ -87,6 +170,7 @@ FIRMS_CACHE_SECONDS = 600  # satellites only pass a few times a day
 _firms_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_firms_cache, "firms")
 def firms_body():
     if time.time() - _firms_cache["time"] > FIRMS_CACHE_SECONDS:
         feats = []
@@ -115,6 +199,7 @@ def firms_body():
     return _firms_cache["body"]
 
 
+@stale_ok(_cache, "esa")
 def esa_body():
     if time.time() - _cache["time"] > CACHE_SECONDS:
         req = urllib.request.Request(ESA_FEED, headers={"User-Agent": "argus-cop"})
@@ -133,6 +218,7 @@ NEWS_CACHE_SECONDS = 600
 _news_cache = {"time": 0.0, "body": b"[]"}
 
 
+@stale_ok(_news_cache, "news")
 def news_body():
     if time.time() - _news_cache["time"] > NEWS_CACHE_SECONDS:
         items = []
@@ -192,6 +278,7 @@ def geocode_body(q):
            for row in rows]
     body = json.dumps(out).encode()
     _geocode_cache[key] = (time.time(), body)
+    _prune_cache(_geocode_cache, GEOCODE_CACHE_MAX)
     return body
 
 
@@ -287,6 +374,7 @@ def _gtfsrt_vehicles(pb, mode):
     return feats
 
 
+@stale_ok(_transit_cache, "transit")
 def transit_body():
     if time.time() - _transit_cache["time"] > TRANSIT_CACHE_SECONDS:
         feats = []
@@ -454,6 +542,7 @@ def _ee_parse(kml_bytes, sev_default):
     return feats
 
 
+@stale_ok(_power_cache, "power")
 def power_body():
     if time.time() - _power_cache["time"] > POWER_CACHE_SECONDS:
         feats = []
@@ -512,9 +601,11 @@ def bom_detail_body(wid):
     body = json.dumps({"message": d.get("message", ""),
                        "title": d.get("title")}).encode()
     _bom_detail_cache[wid] = (time.time(), body)
+    _prune_cache(_bom_detail_cache, 500)
     return body
 
 
+@stale_ok(_bom_cache, "bom")
 def bom_body():
     if time.time() - _bom_cache["time"] > BOM_CACHE_SECONDS:
         req = urllib.request.Request(BOM_WARN_URL, headers={
@@ -537,6 +628,7 @@ RFS_FEED = "https://www.rfs.nsw.gov.au/feeds/majorIncidents.json"
 _rfs_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_rfs_cache, "rfs")
 def rfs_body():
     # RFS asks consumers to poll no more often than every 60 s
     if time.time() - _rfs_cache["time"] > 60:
@@ -559,6 +651,7 @@ AIRQ_CACHE_SECONDS = 900  # readings are hourly; no point hammering Socrata
 _airq_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_airq_cache, "airq")
 def airq_body():
     if time.time() - _airq_cache["time"] > AIRQ_CACHE_SECONDS:
         rows = json.loads(_http_get(AIRQ_URL))
@@ -613,6 +706,7 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
 
 
+@stale_ok(_closures_cache, "closures")
 def closures_body():
     if time.time() - _closures_cache["time"] > CLOSURES_CACHE_SECONDS:
         from datetime import datetime, timedelta, timezone
@@ -667,6 +761,7 @@ SUBURBS_CACHE_SECONDS = 86400
 _suburbs_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_suburbs_cache, "suburbs")
 def suburbs_body():
     if time.time() - _suburbs_cache["time"] > SUBURBS_CACHE_SECONDS:
         qs = urllib.parse.urlencode({
@@ -694,6 +789,7 @@ QUAKES_CACHE_SECONDS = 600
 _quakes_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_quakes_cache, "quakes")
 def quakes_body():
     if time.time() - _quakes_cache["time"] > QUAKES_CACHE_SECONDS:
         data = json.loads(_http_get(QUAKES_URL))
@@ -737,6 +833,7 @@ AIRCRAFT_CACHE_SECONDS = 12  # matches the client poll; polite floor is ~10 s
 _aircraft_cache = {"time": 0.0, "body": b'{"ac":[]}'}
 
 
+@stale_ok(_aircraft_cache, "aircraft")
 def aircraft_body():
     if time.time() - _aircraft_cache["time"] > AIRCRAFT_CACHE_SECONDS:
         req = urllib.request.Request(AIRCRAFT_URL,
@@ -762,6 +859,7 @@ WIND_CACHE_SECONDS = 1800  # client refreshes every 30 min
 _wind_cache = {"time": 0.0, "body": b"[]"}
 
 
+@stale_ok(_wind_cache, "wind")
 def wind_body():
     if time.time() - _wind_cache["time"] > WIND_CACHE_SECONDS:
         with urllib.request.urlopen(WIND_URL, timeout=10) as r:
@@ -784,6 +882,7 @@ WEBCAMS_CACHE_SECONDS = 480   # 8 min < the 10-min image-token expiry
 _webcams_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_webcams_cache, "webcams")
 def webcams_body():
     if time.time() - _webcams_cache["time"] > WEBCAMS_CACHE_SECONDS:
         req = urllib.request.Request(
@@ -837,6 +936,7 @@ WINDFIELD_CACHE_SECONDS = 3600
 _windfield_cache = {"time": 0.0, "body": b""}
 
 
+@stale_ok(_windfield_cache, "windfield")
 def windfield_body():
     if time.time() - _windfield_cache["time"] > WINDFIELD_CACHE_SECONDS:
         import math
@@ -873,6 +973,7 @@ WEATHER_CACHE_SECONDS = 600  # client polls every 10 min
 _weather_cache = {"time": 0.0, "body": b"{}"}
 
 
+@stale_ok(_weather_cache, "weather")
 def weather_body():
     if time.time() - _weather_cache["time"] > WEATHER_CACHE_SECONDS:
         with urllib.request.urlopen(WEATHER_URL, timeout=10) as r:
@@ -1039,16 +1140,59 @@ def sitrep_body():
     return _sitrep_cache["body"]
 
 
+# TomTom tiles are the only upstream here billed per request, against a daily
+# free-tier allowance. The counter is keyed by UTC day to match how that
+# allowance resets. Over budget we keep serving whatever is already in the tile
+# cache -- stale traffic beats a blank layer, and both beat a surprise bill --
+# and stop calling upstream entirely until the day rolls over.
+_tile_budget = {"day": "", "used": 0}
+
+
+def _tile_budget_take():
+    """Claim one upstream tile fetch. False when the day's budget is spent."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    with _guard_lock:
+        if _tile_budget["day"] != day:
+            _tile_budget.update(day=day, used=0)
+        if _tile_budget["used"] >= TOMTOM_DAILY_TILE_BUDGET:
+            return False
+        _tile_budget["used"] += 1
+        return True
+
+
+def valid_tile(z, x, y):
+    """Reject coordinates that cannot exist. The route regex only proves these
+    are digits, so without this a request for z=99 becomes a real upstream call
+    and a permanent cache entry."""
+    if not 0 <= z <= 22:
+        return False
+    span = 1 << z
+    return 0 <= x < span and 0 <= y < span
+
+
 def tomtom_tile(z, x, y):
+    z, x, y = int(z), int(x), int(y)
+    if not valid_tile(z, x, y):
+        raise ValueError("tile out of range")
     key = f"{z}/{x}/{y}"
     hit = _tile_cache.get(key)
     if hit and time.time() - hit[0] < TILE_CACHE_SECONDS:
         return hit[1]
+    if not _tile_budget_take():
+        if hit:
+            return hit[1]  # stale, but free
+        raise RuntimeError("daily TomTom tile budget spent")
     url = (f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/"
            f"{z}/{x}/{y}.png?key={TOMTOM_KEY}")
-    with urllib.request.urlopen(url, timeout=10) as r:
-        body = r.read()
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            body = r.read()
+    except Exception:
+        if hit:
+            return hit[1]
+        raise
     _tile_cache[key] = (time.time(), body)
+    _prune_cache(_tile_cache, TOMTOM_TILE_CACHE_MAX)
     return body
 
 
@@ -1259,6 +1403,28 @@ def history_range_body():
 
 
 class Handler(SimpleHTTPRequestHandler):
+    def client_ip(self):
+        """Best available client address, for rate limiting.
+
+        Behind the Cloudflare tunnel every request arrives from loopback, so
+        CF-Connecting-IP is the only thing separating one visitor from another
+        -- but it is caller-supplied, so honour it only from a peer we have
+        designated as a proxy."""
+        peer = self.client_address[0]
+        if peer in TRUSTED_PROXY_PEERS:
+            fwd = (self.headers.get("CF-Connecting-IP")
+                   or self.headers.get("X-Forwarded-For", "").split(",")[0])
+            if fwd.strip():
+                return fwd.strip()
+        return peer
+
+    def too_many(self, bucket, per_min):
+        """Send a 429 and return True when the caller is over its allowance."""
+        if rate_limited(bucket, self.client_ip(), per_min):
+            self.send_error(429, "rate limited")
+            return True
+        return False
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(302)
@@ -1319,6 +1485,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not TOMTOM_KEY:
                 self.send_error(503, "no TOMTOM_API_KEY in .env")
                 return
+            if self.too_many("tomtom", RATELIMIT_TOMTOM_PER_MIN):
+                return
             try:
                 body = tomtom_tile(*m.groups())
                 self.send_response(200)
@@ -1326,10 +1494,16 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            except ValueError:
+                self.send_error(400, "bad tile coordinate")
+            except RuntimeError:
+                self.send_error(503, "daily tile budget spent")
             except Exception:
                 self.send_error(502, "tomtom unreachable")
             return
         if self.path.rstrip("/") == "/sitrep":
+            if self.too_many("sitrep", RATELIMIT_SITREP_PER_MIN):
+                return
             try:
                 body = sitrep_body()
                 self.send_response(200)
@@ -1425,6 +1599,8 @@ class Handler(SimpleHTTPRequestHandler):
                 urllib.parse.urlparse(self.path).query).get("q", [""])[0]
             if not q.strip():
                 self.send_error(400, "missing q")
+                return
+            if self.too_many("geocode", RATELIMIT_GEOCODE_PER_MIN):
                 return
             try:
                 body = geocode_body(q)

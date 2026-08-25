@@ -69,6 +69,44 @@ homelab box (put API keys in `.env` next to the app files).
 needs `serve.py` — the upstream feed sends no CORS headers, so the little
 server relays it.)
 
+### Exposing it beyond localhost
+
+Argus brokers two things that cost real money or real GPU time: TomTom traffic
+tiles (metered key, daily free-tier allowance) and the Ollama SITREP. Anyone
+who can reach the server can spend both, so if it is reachable by anyone other
+than you, review these. All are optional and read from `.env` or the
+environment; the defaults are already applied.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `TOMTOM_DAILY_TILE_BUDGET` | `40000` | Upstream tile fetches per UTC day. Over budget the proxy serves whatever is already cached and stops calling TomTom until the day rolls over. |
+| `TOMTOM_TILE_CACHE_MAX` | `4000` | Cap on cached tiles, oldest evicted first. |
+| `GEOCODE_CACHE_MAX` | `2000` | Cap on cached geocoder results (keyed by search text). |
+| `RATELIMIT_TOMTOM_PER_MIN` | `240` | Per-IP tile requests per minute. A wide pan is easily 30–40 tiles, so keep this generous. |
+| `RATELIMIT_SITREP_PER_MIN` | `6` | Per-IP SITREP requests per minute. |
+| `RATELIMIT_GEOCODE_PER_MIN` | `20` | Per-IP address searches per minute. |
+| `TRUSTED_PROXY_PEERS` | `127.0.0.1,::1` | Peers whose `CF-Connecting-IP` / `X-Forwarded-For` header is believed. |
+
+Set any rate limit to `0` to disable it.
+
+**Two things these are not.** They are per-IP, per-process, in-memory guards —
+they reset on restart and do nothing about a distributed source. And they are
+**not billing caps**: for hard spend protection set a budget with the provider
+(TomTom developer dashboard).
+
+`TRUSTED_PROXY_PEERS` matters behind a tunnel. A Cloudflare tunnel connects
+from loopback, so without it every tunnelled request shares one rate-limit
+bucket and the per-IP limits mean nothing. It is deliberately a short list:
+the forwarded-IP headers are caller-supplied and trivially spoofed by anyone
+who can reach the port directly.
+
+### Feed resilience
+
+Each upstream feed caches its last good response and keeps serving it if a
+refresh fails, for up to `STALE_MAX_SECONDS` (1 h). A blip upstream no longer
+empties the layer; a feed that stays dead past the window goes back to
+erroring, so it still surfaces as broken rather than silently serving history.
+
 ## Roadmap
 
 - **Phase 2** — proper backend (FastAPI container), live buses via the
