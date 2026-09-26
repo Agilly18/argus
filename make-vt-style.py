@@ -36,7 +36,7 @@ LAYER_TINT = {
 }
 # carto's attribution string carries every feed credit — keep it alive when
 # the raster basemaps are hidden by crediting the vector source the same way
-ATTRIBUTION = ("© OpenStreetMap © OpenFreeMap · aircraft: airplanes.live · "
+ATTRIBUTION = ("© OpenStreetMap © OpenFreeMap · aircraft: adsb.lol · "
                "wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / "
                "Essential Energy · transit: Transport Canberra · air/roads: "
                "ACT Gov · quakes: Geoscience Australia · terrain: Mapzen/AWS")

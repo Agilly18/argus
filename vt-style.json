@@ -11,7 +11,7 @@
   "openmaptiles": {
    "type": "vector",
    "url": "https://tiles.openfreemap.org/planet",
-   "attribution": "\u00a9 OpenStreetMap \u00a9 OpenFreeMap \u00b7 aircraft: airplanes.live \u00b7 wx: Open-Meteo \u00b7 radar: RainViewer \u00b7 outages: Evoenergy / Essential Energy \u00b7 transit: Transport Canberra \u00b7 air/roads: ACT Gov \u00b7 quakes: Geoscience Australia \u00b7 terrain: Mapzen/AWS"
+   "attribution": "\u00a9 OpenStreetMap \u00a9 OpenFreeMap \u00b7 aircraft: adsb.lol \u00b7 wx: Open-Meteo \u00b7 radar: RainViewer \u00b7 outages: Evoenergy / Essential Energy \u00b7 transit: Transport Canberra \u00b7 air/roads: ACT Gov \u00b7 quakes: Geoscience Australia \u00b7 terrain: Mapzen/AWS"
   }
  },
  "layers": [

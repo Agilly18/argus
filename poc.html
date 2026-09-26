@@ -459,7 +459,7 @@ const map = new maplibregl.Map({
       carto: {
         type: 'raster', tileSize: 256,
         tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-        attribution: '© OpenStreetMap © CARTO · aircraft: airplanes.live · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra · air/roads: ACT Gov · quakes: Geoscience Australia'
+        attribution: '© OpenStreetMap © CARTO · aircraft: adsb.lol · wx: Open-Meteo · radar: RainViewer · outages: Evoenergy / Essential Energy · transit: Transport Canberra · air/roads: ACT Gov · quakes: Geoscience Australia'
       },
       osm: {
         type: 'raster', tileSize: 256,
@@ -2493,7 +2493,7 @@ map.on('rotate', acReproject);
 async function fetchAircraft() {
   const wasReplay = !!REPLAY;
   try {
-    // serve.py relay of airplanes.live (one shared upstream stream for all
+    // serve.py relay of adsb.lol (one shared upstream stream for all
     // viewers + snapshots for the time slider); /history/aircraft in replay
     const r = await fetch(feedURL('aircraft'));
     const d = await r.json();

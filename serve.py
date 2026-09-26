@@ -22,7 +22,7 @@ Serves the static page and relays two feeds a browser can't reach directly:
   active now or starting within 24 h
 - /quakes — Geoscience Australia earthquakes (7-day window), slimmed to
   Australian events plus a box around SE Australia
-- /aircraft — airplanes.live positions near Canberra (verbatim relay; one
+- /aircraft — adsb.lol positions near Canberra (verbatim relay; one
   shared upstream stream + snapshotted for the time slider)
 - /wind — Open-Meteo 5x5 wind grid over the ACT (verbatim relay)
 - /weather — Open-Meteo current conditions for Canberra (verbatim relay)
@@ -821,13 +821,22 @@ def quakes_body():
     return _quakes_cache["body"]
 
 
-# --- aircraft (airplanes.live relay) -----------------------------------------
-# The browser used to hit airplanes.live directly (it sends CORS headers), but
-# relaying gives one shared upstream stream for all viewers AND lets the
-# recorder snapshot positions for the time slider. Body is the verbatim
-# upstream JSON ({"ac": [...]}) so the client parser is unchanged.
+# --- aircraft (adsb.lol relay) ------------------------------------------------
+# The browser used to hit the upstream directly, but relaying gives one shared
+# stream for all viewers AND lets the recorder snapshot positions for the time
+# slider. Body is the verbatim upstream JSON ({"ac": [...]}) so the client
+# parser is unchanged.
+# Upstream was airplanes.live until Aug 2026, when they closed the public API:
+# every endpoint now answers 403 "contact us at contact@airplanes.live" unless
+# you feed them (/feed-status reports our IP as running no beast/mlat client).
+# adsb.lol serves the same readsb v2 schema — hex/flight/lat/lon/alt_baro/gs/
+# track/seen/t/category/dbFlags, everything poc.html reads — so the swap is the
+# URL alone. Its lack of CORS headers (why we passed it over in v0.02) stopped
+# mattering the day this became a server-side relay.
+# Same terms as before: non-commercial, ~1 req/s. The permanent fix is still
+# the parked RTL-SDR build — our own receiver, nobody's terms.
 CBR_LAT, CBR_LON, CBR_RADIUS_NM = -35.28, 149.13, 60  # keep in sync w/ poc.html CBR
-AIRCRAFT_URL = (f"https://api.airplanes.live/v2/point/"
+AIRCRAFT_URL = (f"https://api.adsb.lol/v2/point/"
                 f"{CBR_LAT}/{CBR_LON}/{CBR_RADIUS_NM}")
 AIRCRAFT_CACHE_SECONDS = 12  # matches the client poll; polite floor is ~10 s
 _aircraft_cache = {"time": 0.0, "body": b'{"ac":[]}'}

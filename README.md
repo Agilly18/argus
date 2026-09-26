@@ -13,7 +13,7 @@ hundred-eyed watchman of Greek myth.
 
 ## What it shows
 
-- **Aircraft** within 60 NM of Canberra via ADS-B ([airplanes.live](https://airplanes.live)),
+- **Aircraft** within 60 NM of Canberra via ADS-B ([adsb.lol](https://adsb.lol)),
   coloured by altitude, military airframes flagged red. 12 s refresh.
 - **Current weather** for Canberra ([Open-Meteo](https://open-meteo.com)).
 - **Rain radar** overlay ([RainViewer](https://www.rainviewer.com)).
@@ -119,7 +119,7 @@ erroring, so it still surfaces as broken rather than silently serving history.
 
 ## Data attribution
 
-Aircraft data from airplanes.live community receivers. Weather by Open-Meteo
+Aircraft data from adsb.lol community receivers. Weather by Open-Meteo
 (CC-BY 4.0). Radar tiles by RainViewer. Incident data © ACT Emergency Services
 Agency (CC-BY 4.0) and © State of New South Wales (NSW Rural Fire Service).
 Outage data © Evoenergy and © Essential Energy, relayed from their public
