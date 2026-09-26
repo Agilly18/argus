@@ -114,5 +114,31 @@ try:
 finally:
     m._http_get = _real_get
 
+print("\nlocal ADS-B receiver merge:")
+up = {"ac": [{"hex": "7c1111", "r": "VH-AAA", "t": "B738", "dbFlags": 1,
+              "lat": -35.0, "lon": 149.0, "seen_pos": 5}]}
+loc = [{"hex": "7c1111", "lat": -35.1, "lon": 149.1, "seen_pos": 1},
+       {"hex": "7c2222", "lat": -35.2, "lon": 149.2, "seen_pos": 2}]
+out = m._merge_local(__import__("copy").deepcopy(up), loc)
+a = {x["hex"]: x for x in out["ac"]}
+check("fresher local position wins", a["7c1111"]["lat"] == -35.1)
+check("identity fields kept from adsb.lol", a["7c1111"]["r"] == "VH-AAA" and a["7c1111"]["dbFlags"] == 1)
+check("local-only aircraft added + tagged", a.get("7c2222", {}).get("src") == "local")
+stale = m._merge_local(__import__("copy").deepcopy(up), [dict(loc[0], seen_pos=30)])
+check("staler local position ignored", stale["ac"][0]["lat"] == -35.0)
+check("100 NM away is outside the radius", m._nm_from_cbr(-35.28, 151.17) > m.CBR_RADIUS_NM)
+# adsb.lol down + local up => local carries on instead of stale/502
+m._aircraft_cache.update(time=0.0, body=b'{"ac":[]}')
+_real_local, _real_open = m._local_aircraft, urllib.request.urlopen
+m._local_aircraft = lambda: [dict(loc[1])]
+urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(OSError("adsb.lol down"))
+try:
+    body = __import__("json").loads(m.aircraft_body())
+    check("adsb.lol down -> own receiver still serves", [x["hex"] for x in body["ac"]] == ["7c2222"])
+finally:
+    m._local_aircraft, urllib.request.urlopen = _real_local, _real_open
+m.LOCAL_ADSB_URL = ""
+check("unset LOCAL_ADSB_URL -> no local fetch", m._local_aircraft() == [])
+
 print("\n%d failed" % len(fails))
 sys.exit(1 if fails else 0)

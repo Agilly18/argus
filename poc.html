@@ -293,7 +293,7 @@
   <div id="sheet-handle" title="tap to expand"></div>
   <button id="panel-hide" title="hide panel — map-only view">⟨</button>
   <h1>ARGUS</h1>
-  <div class="sub">Canberra · all-source · v0.09<span class="beta">BETA</span></div>
+  <div class="sub">Canberra · all-source · v0.10<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>
@@ -361,6 +361,13 @@
           <label title="live webcam stills — imagery by Windy"><span class="sw ring" style="border-color:var(--cyan)"></span><input type="checkbox" id="tog-cams"> webcams <span id="cams-note" style="color:var(--dim)"></span></label>
         </div>
       </div>
+      <div class="lg" data-lg="sec">
+        <div class="row lg-h"><span class="k">defence &amp; surveillance</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="lg-b">
+          <label title="defence land and facilities as mapped in OpenStreetMap — community data, not an official register"><span class="sw" style="background:rgba(247,118,142,0.25); border:1px dashed #f7768e"></span><input type="checkbox" id="tog-military"> military sites <span id="military-count" style="color:var(--dim)"></span></label>
+          <label title="automatic number-plate recognition cameras as mapped in OpenStreetMap — locations only, may be incomplete or out of date"><span class="sw" style="background:#e0af68"></span><input type="checkbox" id="tog-alpr"> plate-reader cameras <span id="alpr-count" style="color:var(--dim)"></span></label>
+        </div>
+      </div>
       <div class="lg" data-lg="wx">
         <div class="row lg-h"><span class="k">weather &amp; reference</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
         <div class="lg-b">
@@ -368,6 +375,8 @@
           <label><span class="sw" style="background:var(--cyan); border-radius:0; clip-path:polygon(0 40%,70% 40%,70% 15%,100% 50%,70% 85%,70% 60%,0 60%)"></span><input type="checkbox" id="tog-wind"> wind field</label>
           <label title="animated particle flow from live wind data"><span class="sw line" style="background:var(--cyan); width:14px; opacity:0.5"></span><input type="checkbox" id="tog-flow"> wind flow</label>
           <label><span class="sw line" style="background:#3b4261; width:14px"></span><input type="checkbox" id="tog-suburbs" checked> suburb boundaries</label>
+          <label title="recent 30 m true-colour satellite passes (NASA HLS: Sentinel-2 + Landsat)"><span class="sw" style="background:linear-gradient(135deg,#4d6b3c,#8a7f5a)"></span><input type="checkbox" id="tog-imagery"> satellite pass <span id="imagery-note" style="color:var(--dim)"></span></label>
+          <select id="img-date" title="pick a pass — cloud % is the cloudiest tile over the ACT" style="display:none; width:100%; margin:2px 0 4px"></select>
         </div>
       </div>
     </div>
@@ -1621,11 +1630,15 @@ map.on('load', () => {
 
   map.on('click', 'aircraft', e => {
     const p = e.features[0].properties;
+    const slot = 'acx-' + p.hex + '-' + Date.now();
     popupTrack(e.features[0].geometry.coordinates,
       `<b>${p.callsign}</b> ${p.mil === 'true' ? '⚠ MIL' : ''}<br>
+        <div id="${slot}" class="acx" style="color:var(--dim)">looking up…</div>
         type: ${p.type}<br>alt: ${p.alt} ft<br>
-        speed: ${p.speed} kt<br>hex: ${p.hex}`,
+        speed: ${p.speed} kt<br>hex: ${p.hex}` +
+        (p.src === 'local' ? '<br><span style="color:var(--green)">◉ own receiver</span>' : ''),
       'ac', p.hex, p.callsign);
+    acEnrich(slot, p.hex, p.callsign === p.hex ? '' : p.callsign);
   });
   map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
@@ -2075,6 +2088,62 @@ map.on('load', () => {
   });
   map.on('mouseenter', 'webcams', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'webcams', () => map.getCanvas().style.cursor = '');
+
+  // OSM reference layers (lazy, like webcams): military land = faint dashed
+  // red outline + fill + site names; ALPR cameras = small amber dots
+  const EMPTY = () => ({ type: 'FeatureCollection', features: [] });
+  map.addSource('military', { type: 'geojson', data: EMPTY(),
+    attribution: 'defence sites / ALPR: © OpenStreetMap contributors (ODbL)' });
+  map.addLayer({ id: 'military-fill', type: 'fill', source: 'military',
+    filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
+    paint: { 'fill-color': '#f7768e', 'fill-opacity': 0.07 } }, 'esa');
+  map.addLayer({ id: 'military-line', type: 'line', source: 'military',
+    filter: ['!=', ['geometry-type'], 'Point'], layout: { visibility: 'none' },
+    paint: { 'line-color': '#f7768e', 'line-width': 1.2, 'line-opacity': 0.6,
+             'line-dasharray': [3, 2] } }, 'esa');
+  map.addLayer({ id: 'military-label', type: 'symbol', source: 'military',
+    filter: ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['get', 'name'], '']],
+    minzoom: 10,
+    layout: { visibility: 'none', 'text-field': ['get', 'name'],
+      'text-font': ['Open Sans Regular'], 'text-size': 11 },
+    paint: { 'text-color': '#f7768e', 'text-halo-color': '#16161e',
+             'text-halo-width': 1.5 } });
+  map.addSource('alpr', { type: 'geojson', data: EMPTY(),
+    attribution: 'defence sites / ALPR: © OpenStreetMap contributors (ODbL)' });
+  map.addLayer({ id: 'alpr', type: 'circle', source: 'alpr',
+    layout: { visibility: 'none' },
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 3, 14, 6],
+             'circle-color': '#e0af68', 'circle-stroke-color': '#16161e',
+             'circle-stroke-width': 1.5 } });
+  const osmLink = id => `<a href="https://www.openstreetmap.org/${id}"
+    target="_blank" rel="noopener" style="color:#7dcfff">OSM ↗</a>`;
+  for (const id of ['military-fill', 'military-line', 'military-label'])
+    map.on('click', id, e => {
+      const p = e.features[0].properties;
+      new maplibregl.Popup({ offset: 8 }).setLngLat(e.lngLat)
+        .setHTML(`<b>${escH(p.name || 'defence site')}</b><br>
+          ${escH(p.kind)}${p.operator ? ' · ' + escH(p.operator) : ''}<br>
+          <span style="color:#565f89">as mapped in OpenStreetMap · ${osmLink(p.osm)}</span>`)
+        .addTo(map);
+    });
+  map.on('click', 'alpr', e => {
+    const p = e.features[0].properties;
+    const dir = /^\d+$/.test(p.direction) ? `${p.direction}° (${compass(+p.direction)})`
+      : escH(p.direction);
+    new maplibregl.Popup({ offset: 8 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>plate-reader camera</b><br>` +
+        (p.operator ? `operator: ${escH(p.operator)}<br>` : '') +
+        (p.manufacturer ? `make: ${escH(p.manufacturer)}<br>` : '') +
+        (dir ? `facing: ${dir}<br>` : '') +
+        (p.zone ? `zone: ${escH(p.zone)}<br>` : '') +
+        `<span style="color:#565f89">location only, as mapped in OSM · ${osmLink(p.osm)}</span>`)
+      .addTo(map);
+  });
+  for (const id of ['military-fill', 'military-label', 'alpr']) {
+    map.on('mouseenter', id, () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', id, () => map.getCanvas().style.cursor = '');
+  }
 
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
@@ -2566,7 +2635,7 @@ function renderAircraft() {
         track: a.track || 0,
         callsign: (a.flight || a.hex).trim(),
         type: a.t || '?', alt, speed: Math.round(a.gs || 0),
-        hex: a.hex, mil: String(mil),
+        hex: a.hex, mil: String(mil), src: a.src || '',
         seen: a.seen ?? 0   // seconds since last message → staleness fade
       }
     };
@@ -2865,6 +2934,122 @@ document.getElementById('tog-cams').onchange = e => {
   }
   map.setLayoutProperty('webcams', 'visibility',
     e.target.checked ? 'visible' : 'none');
+};
+
+// --- shared tiny helpers: aircraft enrichment, OSM + imagery layers ---
+const escH = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const compass = deg => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][
+  Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+
+// aircraft popup enrichment: serve.py relays adsbdb on click (cached there),
+// never per poll. Fills the popup's placeholder in place.
+async function acEnrich(slot, hex, cs) {
+  let html = '';
+  try {
+    const r = await fetch(`acinfo?hex=${encodeURIComponent(hex)}&cs=${encodeURIComponent(cs)}`);
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    const ap = a => a ? `${escH(a.iata)}${a.city ? ' ' + escH(a.city) : ''}` : '?';
+    if (d.from || d.to)
+      html += `<span style="color:var(--cyan)">${ap(d.from)} → ${ap(d.to)}</span>` +
+        (d.airline ? ` · ${escH(d.airline)}` : '') + '<br>';
+    if (d.maker || d.type)
+      html += `${escH([d.maker, d.type].filter(Boolean).join(' '))}<br>`;
+    if (d.reg || d.owner)
+      html += `${escH(d.reg || '')}${d.owner ? ' · ' + escH(d.owner) : ''}<br>`;
+    if (d.photo)
+      html += `<a href="${escH(d.photo_url || d.photo)}" target="_blank" rel="noopener">` +
+        `<img src="${escH(d.photo)}" alt="" style="width:160px;border-radius:3px;margin:3px 0"></a><br>`;
+  } catch (e) { /* enrichment is garnish: leave the basic popup */ }
+  const el = document.getElementById(slot);
+  if (!el) return;              // popup already closed
+  if (html) { el.innerHTML = html; el.style.color = ''; }
+  else el.remove();
+}
+
+// static OSM layers: fetched once on first toggle, retried if serve.py balks
+const osmStarted = {};
+async function fetchOsmLayer(src, countId, noun) {
+  const count = document.getElementById(countId);
+  try {
+    count.textContent = '(loading…)';
+    const r = await fetch(src);
+    if (!r.ok) throw new Error(r.status);
+    const geo = await r.json();
+    map.getSource(src).setData(geo);
+    const n = src === 'military'
+      ? geo.features.filter(f => f.geometry.type === 'Point' && f.properties.name).length
+      : geo.features.length;
+    count.textContent = `(${n} ${noun})`;
+  } catch (e) {
+    count.textContent = '(unavailable)';
+    osmStarted[src] = false;    // next toggle-on tries again
+  }
+}
+function osmToggle(togId, src, ids, countId, noun) {
+  document.getElementById(togId).onchange = e => {
+    if (e.target.checked && !osmStarted[src]) {
+      osmStarted[src] = true;
+      fetchOsmLayer(src, countId, noun);
+    }
+    for (const id of ids)
+      map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none');
+  };
+}
+osmToggle('tog-military', 'military',
+  ['military-fill', 'military-line', 'military-label'], 'military-count', 'sites');
+osmToggle('tog-alpr', 'alpr', ['alpr'], 'alpr-count', 'cameras');
+
+// recent satellite pass: serve.py lists HLS days over the ACT (CMR); tiles
+// come straight from NASA GIBS. Sits just above the basemaps, under
+// everything else; dated, so replay leaves it alone.
+const IMG_SENSOR = { S30: 'Sentinel-2', L30: 'Landsat' };
+function setImagery(val) {
+  const [prod, date] = val.split('|');
+  if (map.getLayer('imagery')) map.removeLayer('imagery');
+  if (map.getSource('imagery')) map.removeSource('imagery');
+  map.addSource('imagery', { type: 'raster', tileSize: 256, maxzoom: 12,
+    tiles: [`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/HLS_${prod}_Nadir_BRDF_Adjusted_Reflectance/default/${date}/GoogleMapsCompatible_Level12/{z}/{y}/{x}.png`],
+    attribution: 'imagery: NASA GIBS · HLS (Sentinel-2 / Landsat)' });
+  map.addLayer({ id: 'imagery', type: 'raster', source: 'imagery',
+    layout: { visibility: document.getElementById('tog-imagery').checked ? 'visible' : 'none' } },
+    'hillshade');
+}
+let imageryStarted = false;
+async function initImagery() {
+  const note = document.getElementById('imagery-note');
+  const sel = document.getElementById('img-date');
+  try {
+    note.textContent = '(loading…)';
+    const r = await fetch('imagery');
+    if (!r.ok) throw new Error(r.status);
+    const days = await r.json();
+    if (!days.length) { note.textContent = '(no passes in 45 d)'; return; }
+    sel.innerHTML = days.map(d =>
+      `<option value="${d.product}|${d.date}">${d.date} · ${IMG_SENSOR[d.product] || d.product}` +
+      ` · ${d.cloud == null ? '?' : d.cloud + '%'} cloud` +
+      (d.coverage < 1 ? ' · partial' : '') + `</option>`).join('');
+    // default: newest pass covering the whole ACT that's mostly clear,
+    // then any mostly-clear pass, then just the newest
+    const clear = d => d.cloud != null && d.cloud <= 30;
+    const pick = days.find(d => clear(d) && d.coverage >= 1) ||
+      days.find(clear) || days[0];
+    sel.value = `${pick.product}|${pick.date}`;
+    sel.onchange = () => setImagery(sel.value);
+    note.textContent = '';
+    setImagery(sel.value);
+  } catch (e) {
+    note.textContent = '(unavailable)';
+    imageryStarted = false;
+  }
+}
+document.getElementById('tog-imagery').onchange = e => {
+  const on = e.target.checked;
+  document.getElementById('img-date').style.display = on ? '' : 'none';
+  if (on && !imageryStarted) { imageryStarted = true; initImagery(); }
+  if (map.getLayer('imagery'))
+    map.setLayoutProperty('imagery', 'visibility', on ? 'visible' : 'none');
 };
 
 // --- wind-flow particles -------------------------------------------------------

@@ -8,13 +8,18 @@ data source is free.
 Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the
 hundred-eyed watchman of Greek myth.
 
-![version](https://img.shields.io/badge/version-0.09-blue)
+![version](https://img.shields.io/badge/version-0.10-blue)
 ![status](https://img.shields.io/badge/status-beta-orange)
 
 ## What it shows
 
 - **Aircraft** within 60 NM of Canberra via ADS-B ([adsb.lol](https://adsb.lol)),
-  coloured by altitude, military airframes flagged red. 12 s refresh.
+  coloured by altitude, military airframes flagged red. 12 s refresh. Click a
+  plane for its route, airline, owner and photo ([adsbdb](https://www.adsbdb.com),
+  looked up on click and cached). Optionally merges your **own receiver**: set
+  `LOCAL_ADSB_URL` in `.env` to a readsb/dump1090 `aircraft.json` on your
+  network — fresher positions win, and it keeps the layer alive if adsb.lol
+  goes down.
 - **Current weather** for Canberra ([Open-Meteo](https://open-meteo.com)).
 - **Rain radar** overlay ([RainViewer](https://www.rainviewer.com)).
 - **Live emergency incidents** — fires, ambulance callouts, rescues — from the
@@ -50,6 +55,16 @@ hundred-eyed watchman of Greek myth.
 - **Address search** — type an address to geocode it (via
   [Nominatim](https://nominatim.openstreetmap.org), biased to the Canberra
   region) and fly the map to it with a marker.
+- **Defence & surveillance** (off by default) — military land and facilities,
+  and automatic number-plate-recognition cameras, as mapped in
+  [OpenStreetMap](https://www.openstreetmap.org) via the Overpass API.
+  Community data, refreshed weekly: it shows what contributors have tagged,
+  not an official register.
+- **Satellite pass** (off by default) — recent 30 m true-colour imagery from
+  NASA's Harmonized Landsat Sentinel-2 (HLS), pick any pass from the last
+  45 days (cloud % and partial coverage shown). Tiles from
+  [NASA GIBS](https://earthdata.nasa.gov/gibs); no key needed. Useful for
+  before/after around fires and hazard-reduction burns.
 - **Basemaps** — dark (CARTO), street (OSM), or satellite (Esri imagery).
 - **Entity tracking** — pin an aircraft, bus, or incident from its popup:
   highlight ring, longer trail, camera follow, and feed alerts when it
@@ -129,7 +144,13 @@ contributors via Nominatim. Base map © OpenStreetMap contributors, © CARTO.
 Air quality data © Australian Capital Territory (CC-BY 4.0, via
 data.act.gov.au). Road closure data © Transport Canberra and City Services —
 Roads ACT (CC-BY-SA 4.0). Earthquake data © Commonwealth of Australia
-(Geoscience Australia, CC-BY 4.0).
+(Geoscience Australia, CC-BY 4.0). Aircraft routes, types and photos from
+adsbdb (aircraft data via PlaneBase, photos via airport-data.com). Defence
+sites and ALPR camera locations © OpenStreetMap contributors (ODbL), via
+Overpass. Satellite imagery: NASA Harmonized Landsat Sentinel-2 (HLS),
+served by NASA GIBS. Layer ideas for adsbdb enrichment, local receivers,
+OSM military/ALPR context and HLS imagery came from
+[God's Eye View](https://github.com/bilawalsidhu/gods-eye-view) (MIT).
 
 Incident data can affect life and property decisions — treat this as a hobby
 visualisation, not an emergency information service. Use official sources

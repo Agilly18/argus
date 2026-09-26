@@ -40,6 +40,7 @@ import sqlite3
 import struct
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -249,7 +250,7 @@ def news_body():
 # (a browser can't) and bias results to the Canberra region. Results are
 # cached per query and upstream calls throttled to Nominatim's 1 req/s limit.
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-GEOCODE_UA = "argus/0.09 (personal situational-awareness map)"
+GEOCODE_UA = "argus/0.10 (personal situational-awareness map)"
 # lon,lat,lon,lat box around the ACT — biases but doesn't hard-limit results
 GEOCODE_VIEWBOX = "148.6,-35.05,149.5,-35.65"
 GEOCODE_CACHE_SECONDS = 3600
@@ -869,16 +870,346 @@ AIRCRAFT_CACHE_SECONDS = 12  # matches the client poll; polite floor is ~10 s
 _aircraft_cache = {"time": 0.0, "body": b'{"ac":[]}'}
 
 
+# Optional own receiver: a readsb/dump1090 aircraft.json on the LAN, e.g.
+# http://192.168.0.234:8080/data/aircraft.json. Merged by hex over adsb.lol
+# (fresher position wins) and used alone if adsb.lol is down -- the answer to
+# depending on someone else's API terms. Unset = adsb.lol only.
+LOCAL_ADSB_URL = _cfg("LOCAL_ADSB_URL", "")
+# position-ish fields a local sighting may overwrite; identity fields (r, t,
+# dbFlags) stay adsb.lol's, since a bare readsb has no aircraft database
+LOCAL_POS_KEYS = ("lat", "lon", "alt_baro", "alt_geom", "gs", "track",
+                  "baro_rate", "geom_rate", "squawk", "seen", "seen_pos")
+_local_adsb = {"up": None}
+
+
+def _nm_from_cbr(lat, lon):
+    """Great-circle distance from the CBR centre in nautical miles."""
+    import math
+    p1, p2 = math.radians(CBR_LAT), math.radians(lat)
+    dlat, dlon = p2 - p1, math.radians(lon - CBR_LON)
+    h = (math.sin(dlat / 2) ** 2 +
+         math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2)
+    return 2 * 3440.065 * math.asin(math.sqrt(h))
+
+
+def _local_aircraft():
+    """Aircraft from the local receiver inside the CBR radius, or []. Logs
+    only on up/down transitions: when the receiver host is off this is
+    polled every 12 s and would otherwise flood the log."""
+    if not LOCAL_ADSB_URL:
+        return []
+    try:
+        req = urllib.request.Request(LOCAL_ADSB_URL,
+                                     headers={"User-Agent": GEOCODE_UA})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            ac = json.loads(r.read()).get("aircraft", [])
+    except Exception as exc:
+        if _local_adsb["up"] is not False:
+            print(f"[argus] local receiver unreachable ({exc}); "
+                  f"adsb.lol only", flush=True)
+        _local_adsb["up"] = False
+        return []
+    if _local_adsb["up"] is not True:
+        print("[argus] local receiver up", flush=True)
+    _local_adsb["up"] = True
+    return [a for a in ac
+            if isinstance(a, dict) and a.get("hex")
+            and a.get("lat") is not None and a.get("lon") is not None
+            and a.get("seen_pos", 0) < 60
+            and _nm_from_cbr(a["lat"], a["lon"]) <= CBR_RADIUS_NM]
+
+
+def _merge_local(data, local):
+    """Fold local sightings into the adsb.lol body, tagging them src=local."""
+    by_hex = {a.get("hex"): i for i, a in enumerate(data.get("ac", []))}
+    for la in local:
+        i = by_hex.get(la["hex"])
+        if i is None:
+            data["ac"].append(dict(la, src="local"))
+            continue
+        up = data["ac"][i]
+        if la.get("seen_pos", 99) <= up.get("seen_pos", up.get("seen", 99)):
+            merged = dict(up, src="local")
+            merged.update({k: la[k] for k in LOCAL_POS_KEYS if k in la})
+            data["ac"][i] = merged
+    return data
+
+
 @stale_ok(_aircraft_cache, "aircraft")
 def aircraft_body():
     if time.time() - _aircraft_cache["time"] > AIRCRAFT_CACHE_SECONDS:
-        req = urllib.request.Request(AIRCRAFT_URL,
-                                     headers={"User-Agent": "argus/0.09"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            body = r.read()
-        json.loads(body)  # refuse to cache junk
-        _aircraft_cache.update(time=time.time(), body=body)
+        local = _local_aircraft()
+        try:
+            req = urllib.request.Request(AIRCRAFT_URL,
+                                         headers={"User-Agent": GEOCODE_UA})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())  # refuse to cache junk
+        except Exception:
+            if not local:
+                raise  # stale_ok serves the last good body
+            data = {"ac": []}  # adsb.lol down: own receiver carries on
+        if local:
+            data = _merge_local(data, local)
+        _aircraft_cache.update(time=time.time(),
+                               body=json.dumps(data).encode())
     return _aircraft_cache["body"]
+
+
+# --- aircraft enrichment (adsbdb) --------------------------------------------
+# adsb.lol already carries registration + ICAO type; adsbdb adds the route
+# (callsign -> origin/destination), airline, full type name, owner and a
+# photo. Looked up on demand when a plane is clicked, never per poll. No
+# published rate limit, so: cache hard (negatives too), space upstream calls,
+# rate-limit per client.
+ADSBDB_BASE = "https://api.adsbdb.com/v0"
+ACINFO_TTL = 24 * 3600
+ACINFO_NEG_TTL = 3600
+ACINFO_CACHE_MAX = int(_cfg("ACINFO_CACHE_MAX", "3000"))
+RATELIMIT_ACINFO_PER_MIN = int(_cfg("RATELIMIT_ACINFO_PER_MIN", "30"))
+_acinfo_cache = {}
+_acinfo_lock = threading.Lock()
+_acinfo_last = [0.0]
+
+
+def _adsbdb(kind, key):
+    """One adsbdb record ('aircraft'/<hex> or 'callsign'/<cs>), or None."""
+    hit = _acinfo_cache.get((kind, key))
+    if hit and time.time() - hit[0] < (ACINFO_TTL if hit[1] is not None
+                                       else ACINFO_NEG_TTL):
+        return hit[1]
+    with _acinfo_lock:  # serialise + space upstream calls (≤4/s)
+        wait = 0.25 - (time.time() - _acinfo_last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _acinfo_last[0] = time.time()
+    req = urllib.request.Request(f"{ADSBDB_BASE}/{kind}/{key}",
+                                 headers={"User-Agent": GEOCODE_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read()).get("response")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429 or exc.code >= 500:
+            raise  # transient: don't cache
+        data = None  # 404 unknown / 400 unparseable callsign: a real "no"
+    data = data if isinstance(data, dict) else None
+    _acinfo_cache[(kind, key)] = (time.time(), data)
+    _prune_cache(_acinfo_cache, ACINFO_CACHE_MAX)
+    return data
+
+
+def _airport(a):
+    if not isinstance(a, dict):
+        return None
+    return {"iata": a.get("iata_code") or a.get("icao_code") or "",
+            "city": a.get("municipality") or "", "name": a.get("name") or ""}
+
+
+def acinfo_body(hex_, callsign):
+    """Compact enrichment for one aircraft. Each half fails independently."""
+    out = {}
+    if re.fullmatch(r"[0-9a-f]{6}", hex_):
+        try:
+            a = (_adsbdb("aircraft", hex_) or {}).get("aircraft") or {}
+            out.update({k: a.get(v) for k, v in (
+                ("reg", "registration"), ("type", "type"),
+                ("maker", "manufacturer"), ("owner", "registered_owner"),
+                ("photo", "url_photo_thumbnail"), ("photo_url", "url_photo"))
+                if a.get(v)})
+        except Exception:
+            out["aircraft_error"] = True
+    if re.fullmatch(r"[A-Z0-9]{3,8}", callsign):
+        try:
+            fr = (_adsbdb("callsign", callsign) or {}).get("flightroute") or {}
+            if fr:
+                out["airline"] = (fr.get("airline") or {}).get("name")
+                out["from"] = _airport(fr.get("origin"))
+                out["to"] = _airport(fr.get("destination"))
+        except Exception:
+            out["route_error"] = True
+    return json.dumps(out).encode()
+
+
+# --- OpenStreetMap context layers (Overpass) ---------------------------------
+# Static-ish reference data: military land + ALPR cameras around the ACT.
+# Refreshed weekly; a failed refresh keeps the last good copy indefinitely
+# (it's reference, not live) and retries in an hour. Community-mapped: shows
+# what OSM contributors have tagged, not an authoritative register.
+OVERPASS_MIRRORS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+)
+OSM_BBOX = "-36.0,148.7,-35.0,149.6"  # s,w,n,e: ACT + Queanbeyan/Bungendore
+OSM_CACHE_SECONDS = 7 * 86400
+_military_cache = {"time": 0.0, "body": b""}
+_alpr_cache = {"time": 0.0, "body": b""}
+
+
+def _overpass(query):
+    last = None
+    for url in OVERPASS_MIRRORS:
+        try:
+            req = urllib.request.Request(
+                url, data=urllib.parse.urlencode({"data": query}).encode(),
+                headers={"User-Agent": GEOCODE_UA})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read())["elements"]
+        except Exception as exc:
+            last = exc
+    raise last
+
+
+def _static_osm(cache, label, build):
+    """Serve `cache`, rebuilding weekly; keep the old copy on failure."""
+    if time.time() - cache["time"] > OSM_CACHE_SECONDS:
+        try:
+            cache.update(time=time.time(), body=json.dumps(
+                {"type": "FeatureCollection", "features": build()}).encode())
+        except Exception as exc:
+            if not cache["body"]:
+                raise
+            print(f"[argus] {label} refresh failed ({exc}); keeping "
+                  f"last copy, retry in 1 h", flush=True)
+            cache["time"] = time.time() - OSM_CACHE_SECONDS + 3600
+    return cache["body"]
+
+
+def _osm_geoms(el):
+    """Overpass `out geom` element -> list of GeoJSON geometries."""
+    def line(pts):
+        c = [[p["lon"], p["lat"]] for p in pts or [] if p]
+        if len(c) >= 4 and c[0] == c[-1]:
+            return {"type": "Polygon", "coordinates": [c]}
+        return {"type": "LineString", "coordinates": c} if len(c) >= 2 else None
+    if el["type"] == "node":
+        return [{"type": "Point", "coordinates": [el["lon"], el["lat"]]}]
+    if el["type"] == "way":
+        return [g for g in [line(el.get("geometry"))] if g]
+    # multipolygon: outer rings usually arrive split across several ways,
+    # so stitch segments end-to-end (reversing as needed) before closing
+    segs = [[(p["lon"], p["lat"]) for p in m.get("geometry") or [] if p]
+            for m in el.get("members", [])
+            if m.get("type") == "way" and m.get("role") != "inner"]
+    segs = [sg for sg in segs if len(sg) >= 2]
+    rings = []
+    while segs:
+        ring = segs.pop(0)
+        grew = True
+        while grew and ring[0] != ring[-1]:
+            grew = False
+            for i, sg in enumerate(segs):
+                if sg[0] == ring[-1]:
+                    ring += sg[1:]
+                elif sg[-1] == ring[-1]:
+                    ring += sg[-2::-1]
+                elif sg[-1] == ring[0]:
+                    ring = sg[:-1] + ring
+                elif sg[0] == ring[0]:
+                    ring = sg[:0:-1] + ring
+                else:
+                    continue
+                segs.pop(i)
+                grew = True
+                break
+        rings.append([list(p) for p in ring])
+    return [g for g in (line([{"lon": x, "lat": y} for x, y in r])
+                        for r in rings) if g]
+
+
+def _military_features():
+    els = _overpass(f"[out:json][timeout:90];"
+                    f"(nwr[\"landuse\"=\"military\"]({OSM_BBOX});"
+                    f"nwr[\"military\"]({OSM_BBOX}););out geom;")
+    feats = []
+    for el in els:
+        t = el.get("tags", {})
+        props = {"name": t.get("name", ""), "operator": t.get("operator", ""),
+                 "kind": (t.get("military") or "military land").replace("_", " "),
+                 "osm": f"{el['type']}/{el['id']}"}
+        geoms = _osm_geoms(el)
+        feats += [{"type": "Feature", "geometry": g, "properties": props}
+                  for g in geoms]
+        b = el.get("bounds")
+        if props["name"] and b and el["type"] != "node":  # one label per site
+            feats.append({"type": "Feature", "properties": dict(props, label=1),
+                          "geometry": {"type": "Point", "coordinates": [
+                              (b["minlon"] + b["maxlon"]) / 2,
+                              (b["minlat"] + b["maxlat"]) / 2]}})
+    return feats
+
+
+def _alpr_features():
+    els = _overpass(f"[out:json][timeout:60];"
+                    f"node[\"surveillance:type\"~\"ALPR\",i]({OSM_BBOX});out;")
+    return [{"type": "Feature",
+             "geometry": {"type": "Point", "coordinates": [e["lon"], e["lat"]]},
+             "properties": {
+                 "operator": e.get("tags", {}).get("operator", ""),
+                 "manufacturer": e.get("tags", {}).get("manufacturer", ""),
+                 "direction": (e.get("tags", {}).get("camera:direction")
+                               or e.get("tags", {}).get("direction", "")),
+                 "zone": e.get("tags", {}).get("surveillance:zone", ""),
+                 "osm": f"node/{e['id']}"}}
+            for e in els if e.get("type") == "node"]
+
+
+def military_body():
+    return _static_osm(_military_cache, "military", _military_features)
+
+
+def alpr_body():
+    return _static_osm(_alpr_cache, "alpr", _alpr_features)
+
+
+# --- recent satellite imagery (NASA HLS via CMR, tiles from GIBS) ------------
+# Harmonized Landsat Sentinel-2: 30 m true colour, a pass every ~2-3 days.
+# serve.py only answers "which days have a pass over the ACT, how cloudy";
+# the page pulls tiles straight from GIBS (keyless, CORS *).
+CMR_GRANULES = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
+HLS_COLLECTIONS = {"S30": "C2021957295-LPCLOUD",   # Sentinel-2
+                   "L30": "C2021957657-LPCLOUD"}   # Landsat 8/9
+IMAGERY_BBOX = "148.95,-35.5,149.3,-35.1"  # w,s,e,n: urban ACT
+IMAGERY_DAYS = 45
+IMAGERY_CACHE_SECONDS = 3 * 3600
+_imagery_cache = {"time": 0.0, "body": b""}
+
+
+@stale_ok(_imagery_cache, "imagery")
+def imagery_body():
+    if time.time() - _imagery_cache["time"] > IMAGERY_CACHE_SECONDS:
+        from datetime import datetime, timedelta, timezone
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=IMAGERY_DAYS)
+        days = {}
+        for prod, coll in HLS_COLLECTIONS.items():
+            url = (f"{CMR_GRANULES}?collection_concept_id={coll}"
+                   f"&bounding_box={IMAGERY_BBOX}"
+                   f"&temporal={start:%Y-%m-%dT%H:%M:%SZ},{end:%Y-%m-%dT%H:%M:%SZ}"
+                   f"&sort_key=-start_date&page_size=200")
+            for it in json.loads(_http_get(url, timeout=30)).get("items", []):
+                u = it.get("umm", {})
+                day = (u.get("TemporalExtent", {}).get("RangeDateTime", {})
+                       .get("BeginningDateTime", ""))[:10]
+                cloud = next((float(a["Values"][0]) for a in
+                              u.get("AdditionalAttributes", [])
+                              if a.get("Name") == "CLOUD_COVERAGE"), None)
+                # GranuleUR = HLS.S30.T55HFA.2026266T001109.v2.0 — the MGRS
+                # tile; a pass often clips the ACT with only one of them
+                parts = (u.get("GranuleUR") or "").split(".")
+                tile = parts[2] if len(parts) > 2 else "?"
+                if len(day) == 10:
+                    days.setdefault((day, prod), {})[tile] = cloud
+        full = max((len(t) for t in days.values()), default=0)
+        out = [{"date": d, "product": p,
+                "cloud": round(max(c for c in t.values() if c is not None))
+                if any(c is not None for c in t.values()) else None,
+                "coverage": round(len(t) / full, 2) if full else 0}
+               for (d, p), t in days.items()]
+        out.sort(key=lambda x: (x["date"], x["product"]), reverse=True)
+        _imagery_cache.update(time=time.time(), body=json.dumps(out).encode())
+    return _imagery_cache["body"]
+
+
 
 
 # --- wind field (Open-Meteo relay) --------------------------------------------
@@ -923,7 +1254,7 @@ def webcams_body():
     if time.time() - _webcams_cache["time"] > WEBCAMS_CACHE_SECONDS:
         req = urllib.request.Request(
             WEBCAMS_URL, headers={"x-windy-api-key": WINDY_KEY,
-                                  "User-Agent": "argus/0.09"})
+                                  "User-Agent": "argus/0.10"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read())
         feats = []
@@ -1685,6 +2016,36 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 self.send_error(502, "earthquake feed unreachable")
             return
+        if self.path.startswith("/acinfo"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            hex_ = qs.get("hex", [""])[0].strip().lower()
+            cs = qs.get("cs", [""])[0].strip().upper()
+            if not hex_ and not cs:
+                self.send_error(400, "missing hex/cs")
+                return
+            if self.too_many("acinfo", RATELIMIT_ACINFO_PER_MIN):
+                return
+            body = acinfo_body(hex_, cs)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        for route, fn, what in (("/military", military_body, "OSM military"),
+                                ("/alpr", alpr_body, "OSM ALPR"),
+                                ("/imagery", imagery_body, "imagery catalog")):
+            if self.path.rstrip("/") == route:
+                try:
+                    body = fn()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    self.send_error(502, f"{what} unreachable")
+                return
         if self.path.rstrip("/") == "/airq":
             try:
                 body = airq_body()
