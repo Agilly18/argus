@@ -87,5 +87,32 @@ print("\ndecorators applied to feeds:")
 for fn in ("esa_body","firms_body","rfs_body","aircraft_body","weather_body","webcams_body"):
     check(fn + " wrapped", getattr(m, fn).__wrapped__ is not None)
 
+print("\nevoenergy per-record guard:")
+ring = '[{"lat":-35.26,"lng":149.13},{"lat":-35.27,"lng":149.14},{"lat":-35.28,"lng":149.13}]'
+base = {"Status": "Active", "Type": "Unplanned", "OutageID": "T1",
+        "PolygonCoordinates": ring}
+ok = m._evo_record(dict(base, PolygonCentroidCoordinate='{"lat":-35.27,"lng":149.133}'))
+check("good centroid kept", ok and ok[0]["geometry"]["coordinates"] == [149.133, -35.27])
+# the real 2026-09-09 failure: centroid truncated at exactly 40 chars
+trunc = m._evo_record(dict(base, PolygonCentroidCoordinate='{"lat":-35.264601999999996,"lng":149.138'))
+check("truncated centroid falls back to ring mean",
+      trunc and abs(trunc[0]["geometry"]["coordinates"][0] - 149.1333) < 1e-3)
+check("no centroid, bad ring -> dropped, no raise",
+      m._evo_record(dict(base, PolygonCentroidCoordinate="{", PolygonCoordinates="[{")) == [])
+check("completed status filtered", m._evo_record(dict(base, Status="Completed")) == [])
+_real_get = m._http_get
+page = ('x outagesViewModel = [' + ','.join(__import__("json").dumps(r) for r in (
+    dict(base, OutageID="A", PolygonCentroidCoordinate='{"lat":-35.27,"lng":149.13}'),
+    dict(base, OutageID="B", PolygonCentroidCoordinate='{"lat":-35.2', PolygonCoordinates="nope"),
+    ["not", "a", "dict"],
+    dict(base, OutageID="C", PolygonCentroidCoordinate='{"lat":-35.29,"lng":149.12}'),
+)) + '];').encode()
+m._http_get = lambda *a, **k: page
+try:
+    ids = {f["properties"]["id"] for f in m._evo_features()}
+    check("one bad record doesn't blank the utility (A and C survive)", ids == {"A", "C"})
+finally:
+    m._http_get = _real_get
+
 print("\n%d failed" % len(fails))
 sys.exit(1 if fails else 0)

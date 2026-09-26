@@ -465,35 +465,61 @@ def _evo_features():
         return []
     feats = []
     for o in json.loads(m.group(1)):
-        status = (o.get("Status") or "").lower()
-        otype = (o.get("Type") or "").lower()
-        if status not in ("active", "scheduled"):
-            continue  # cancelled / completed / restored = noise
-        centroid = json.loads(o.get("PolygonCentroidCoordinate") or "null")
-        if not centroid:
-            continue
-        sev = ("unplanned" if otype == "unplanned" else
-               "planned-active" if status == "active" else "scheduled")
-        sched = o.get("ScheduledStartDateTime") or ""
-        if sev == "scheduled" and len(sched) >= 10 and _beyond_horizon(
-                sched[8:10], sched[5:7], sched[0:4]):
-            continue
-        props = {
-            "src": "Evoenergy", "id": o.get("OutageID", "?"),
-            "otype": otype, "sev": sev,
-            "customers": o.get("AffectedCustomersCount") or 0,
-            "where": (o.get("AffectedSuburbs") or "").title(),
-            "reason": o.get("Description") or "",
-            "start": _fmt_evo(o.get("ActualStartDateTime")
-                              or o.get("ScheduledStartDateTime")),
-            "eta": _fmt_evo(o.get("ExpectedRestorationDateTime")
-                            or o.get("ScheduledEndDateTime")),
-        }
-        ring = [[p["lng"], p["lat"]]
-                for p in json.loads(o.get("PolygonCoordinates") or "[]")]
-        feats.extend(_outage_features(
-            props, [centroid["lng"], centroid["lat"]], ring))
+        try:
+            feats.extend(_evo_record(o))
+        except Exception as exc:  # one malformed row must not blank the rest
+            oid = o.get("OutageID", "?") if isinstance(o, dict) else "?"
+            print(f"[argus] evoenergy: skipped outage {oid} ({exc})",
+                  flush=True)
     return feats
+
+
+def _evo_ring(o):
+    """PolygonCoordinates → [[lng, lat], ...], or [] if absent/unparseable."""
+    try:
+        return [[p["lng"], p["lat"]]
+                for p in json.loads(o.get("PolygonCoordinates") or "[]")]
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+def _evo_record(o):
+    """One Evoenergy outage → features. Evoenergy sometimes truncates
+    PolygonCentroidCoordinate at 40 chars (seen Sep 2026), so fall back to
+    the mean of the polygon ring rather than dropping the outage."""
+    status = (o.get("Status") or "").lower()
+    otype = (o.get("Type") or "").lower()
+    if status not in ("active", "scheduled"):
+        return []  # cancelled / completed / restored = noise
+    ring = _evo_ring(o)
+    try:
+        c = json.loads(o.get("PolygonCentroidCoordinate") or "null")
+        centroid = [c["lng"], c["lat"]] if c else None
+    except (ValueError, KeyError, TypeError):
+        centroid = None
+    if not centroid and ring:
+        centroid = [sum(p[0] for p in ring) / len(ring),
+                    sum(p[1] for p in ring) / len(ring)]
+    if not centroid:
+        return []
+    sev = ("unplanned" if otype == "unplanned" else
+           "planned-active" if status == "active" else "scheduled")
+    sched = o.get("ScheduledStartDateTime") or ""
+    if sev == "scheduled" and len(sched) >= 10 and _beyond_horizon(
+            sched[8:10], sched[5:7], sched[0:4]):
+        return []
+    props = {
+        "src": "Evoenergy", "id": o.get("OutageID", "?"),
+        "otype": otype, "sev": sev,
+        "customers": o.get("AffectedCustomersCount") or 0,
+        "where": (o.get("AffectedSuburbs") or "").title(),
+        "reason": o.get("Description") or "",
+        "start": _fmt_evo(o.get("ActualStartDateTime")
+                          or o.get("ScheduledStartDateTime")),
+        "eta": _fmt_evo(o.get("ExpectedRestorationDateTime")
+                        or o.get("ScheduledEndDateTime")),
+    }
+    return _outage_features(props, centroid, ring)
 
 
 def _ee_parse(kml_bytes, sev_default):
@@ -549,8 +575,9 @@ def power_body():
         for fetch in (_evo_features, _ee_current_features, _ee_future_features):
             try:
                 feats.extend(fetch())
-            except Exception:
-                pass  # one utility down shouldn't blank the other
+            except Exception as exc:  # one utility down shouldn't blank the other
+                print(f"[argus] power: {fetch.__name__} failed ({exc})",
+                      flush=True)
         _power_cache.update(time=time.time(), body=json.dumps(
             {"type": "FeatureCollection", "features": feats}).encode())
     return _power_cache["body"]
