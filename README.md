@@ -8,7 +8,7 @@ data source is free.
 Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the
 hundred-eyed watchman of Greek myth.
 
-![version](https://img.shields.io/badge/version-0.10-blue)
+![version](https://img.shields.io/badge/version-0.11-blue)
 ![status](https://img.shields.io/badge/status-beta-orange)
 
 ## What it shows
@@ -19,7 +19,10 @@ hundred-eyed watchman of Greek myth.
   looked up on click and cached). Optionally merges your **own receiver**: set
   `LOCAL_ADSB_URL` in `.env` to a readsb/dump1090 `aircraft.json` on your
   network — fresher positions win, and it keeps the layer alive if adsb.lol
-  goes down.
+  goes down. Aircraft glide between updates (dead reckoning along track at
+  ground speed, capped at 30 s), and clicking one draws its current flight
+  leg — where it took off from — from [adsb.lol](https://adsb.lol) traces.
+  Tracked aircraft keep their leg, refreshed every minute.
 - **Current weather** for Canberra ([Open-Meteo](https://open-meteo.com)).
 - **Rain radar** overlay ([RainViewer](https://www.rainviewer.com)).
 - **Live emergency incidents** — fires, ambulance callouts, rescues — from the
@@ -60,6 +63,10 @@ hundred-eyed watchman of Greek myth.
   [OpenStreetMap](https://www.openstreetmap.org) via the Overpass API.
   Community data, refreshed weekly: it shows what contributors have tagged,
   not an official register.
+- **Critical infrastructure** (off by default) — data centres, dams and
+  water treatment, substations and power plants, telephone exchanges and
+  comms towers, and hospitals, as mapped in OpenStreetMap, colour-coded by
+  sector.
 - **Satellite pass** (off by default) — recent 30 m true-colour imagery from
   NASA's Harmonized Landsat Sentinel-2 (HLS), pick any pass from the last
   45 days (cloud % and partial coverage shown). Tiles from
@@ -114,6 +121,23 @@ from loopback, so without it every tunnelled request shares one rate-limit
 bucket and the per-IP limits mean nothing. It is deliberately a short list:
 the forwarded-IP headers are caller-supplied and trivially spoofed by anyone
 who can reach the port directly.
+
+### Layer watch
+
+Feeds rarely fail loudly. They keep answering 200 OK with a layer that has
+quietly gone hollow: an outage map with one utility missing, an incident
+feed that stopped carrying ambulance calls. Argus watches the feature count
+of each layer (and each part of one, like Evoenergy inside power), learns
+from its own 72 h history how long each is normally empty (aircraft at 3 am
+are, ambulance calls never are), and raises an alarm when a layer stays
+empty longer than that, or when an upstream keeps failing for over an hour.
+Alarms show as a red banner above the health dots and as feed events (with
+a desktop notification if those are on); `/health/watch` has the details.
+Feeds where empty just means quiet (fires, quakes, BOM warnings) aren't
+watched. Optional Telegram delivery: set `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID` in `.env`. Tunables: `WATCH_EMPTY_FLOOR_MIN` (default 30)
+and `WATCH_FAIL_MIN` (default 60). State lives in `layer-watch.json` next to
+the history DB; delete it to forget a layer that has legitimately gone away.
 
 ### Feed resilience
 

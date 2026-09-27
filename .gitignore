@@ -5,3 +5,6 @@ history.db
 history.db-wal
 history.db-shm
 data/
+# layer-watch state (dev writes next to history.db; prod uses ./data)
+layer-watch.json
+layer-watch.json.tmp

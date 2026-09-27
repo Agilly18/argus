@@ -140,5 +140,30 @@ finally:
 m.LOCAL_ADSB_URL = ""
 check("unset LOCAL_ADSB_URL -> no local fetch", m._local_aircraft() == [])
 
+print("\nempty-layer watch:")
+now = time.time()
+m.WATCH_STATE = "/tmp/argus-test-watch.json"
+m._watch.update(groups={}, fails={}, alarms={})
+m._watch_observe("power", b'{"features":[{"geometry":{"type":"Point"},"properties":{"src":"Evoenergy"}}]}')
+check("groups counted incl. zero sibling",
+      m._watch["groups"]["power/Evoenergy"]["count"] == 1 and m._watch["groups"]["power/Essential Energy"]["count"] == 0)
+check("never-seen group isn't judged", (m._watch_evaluate() or True) and not m._watch["alarms"])
+m._watch["groups"]["power/Evoenergy"].update(count=0, last_nonzero=now - 40 * 60, max_gap=5 * 60)
+m._watch_evaluate()
+check("empty 40 min, normal gap 5 min -> alarm", "empty:power/Evoenergy" in m._watch["alarms"])
+m._watch["groups"]["power/Evoenergy"].update(max_gap=4 * 3600)
+m._watch_evaluate()
+check("same gap but normal nights run 4 h -> no alarm", "empty:power/Evoenergy" not in m._watch["alarms"])
+m.watch_fail("esa", OSError("HTTP 404"))
+m._watch["fails"]["esa"]["first"] = now - 2 * 3600
+m._watch_evaluate()
+check("failing 2 h -> alarm", "fail:esa" in m._watch["alarms"])
+m._watch["fails"]["esa"]["last"] = now - 3600
+m._watch_evaluate()
+check("nobody retried for 1 h -> stale, dropped", "fail:esa" not in m._watch["alarms"])
+check("quiet feeds not watched", m._watch_groups("rfs", b'{"features":[]}') == {})
+m._watch_save(); m._watch["groups"].clear(); m._watch_load()
+check("last-seen persists across restart", "power/Evoenergy" in m._watch["groups"])
+
 print("\n%d failed" % len(fails))
 sys.exit(1 if fails else 0)

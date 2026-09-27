@@ -166,6 +166,8 @@
     align-items: center; gap: 6px; }
   .lg-h .k { font-size: 11px; letter-spacing: 0.08em; }
   .lg-h:hover .k { color: var(--fg); }
+  #watch-alarms div { border-left: 3px solid var(--red); background: rgba(247,118,142,0.08);
+    padding: 3px 6px; margin: 4px 0; font-size: 11px; color: var(--red); }
   .lg-h .lg-all { margin-left: auto; font-size: 10px; padding: 0 6px; }
   .lg.closed .lg-b { display: none; }
   .lg-b { margin-left: 2px; }
@@ -293,7 +295,7 @@
   <div id="sheet-handle" title="tap to expand"></div>
   <button id="panel-hide" title="hide panel — map-only view">⟨</button>
   <h1>ARGUS</h1>
-  <div class="sub">Canberra · all-source · v0.10<span class="beta">BETA</span></div>
+  <div class="sub">Canberra · all-source · v0.11<span class="beta">BETA</span></div>
 
   <div class="row" id="stress" title="composite of incidents, fires, outages, warnings, weather — click for breakdown">
     <span class="k">stress index</span>
@@ -362,9 +364,11 @@
         </div>
       </div>
       <div class="lg" data-lg="sec">
-        <div class="row lg-h"><span class="k">defence &amp; surveillance</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
+        <div class="row lg-h"><span class="k">security &amp; infrastructure</span><button class="lg-all" title="toggle whole group">all</button><span class="k lg-a">▾</span></div>
         <div class="lg-b">
           <label title="defence land and facilities as mapped in OpenStreetMap — community data, not an official register"><span class="sw" style="background:rgba(247,118,142,0.25); border:1px dashed #f7768e"></span><input type="checkbox" id="tog-military"> military sites <span id="military-count" style="color:var(--dim)"></span></label>
+          <label title="data centres, water, energy, comms and hospitals as mapped in OpenStreetMap — community data, not an official register"><span class="sw" style="background:#7dcfff; box-shadow:0 0 0 1px #c0caf5"></span><input type="checkbox" id="tog-infra"> critical infrastructure <span id="infra-count" style="color:var(--dim)"></span></label>
+          <div class="legend" id="infra-legend" style="display:none"><b style="color:#7dcfff">● data</b><b style="color:#7aa2f7">● water</b><b style="color:#73daca">● energy</b><b style="color:#bb9af7">● comms</b><b style="color:#9ece6a">● health</b></div>
           <label title="automatic number-plate recognition cameras as mapped in OpenStreetMap — locations only, may be incomplete or out of date"><span class="sw" style="background:#e0af68"></span><input type="checkbox" id="tog-alpr"> plate-reader cameras <span id="alpr-count" style="color:var(--dim)"></span></label>
         </div>
       </div>
@@ -415,6 +419,7 @@
       <span><span id="news-note" style="color:var(--dim)"></span> <span class="k sec-a">▾</span></span></div>
     <div class="sec-b"><div id="newslist"></div></div>
   </div>
+  <div id="watch-alarms"></div>
   <div id="health"></div>
   <div id="status"><div id="dot"></div><span id="status-text">connecting…</span></div>
 </div>
@@ -626,7 +631,7 @@ const HEALTH = {
   esa: { iv: 60e3 }, firms: { iv: 600e3 }, rfs: { iv: 60e3 },
   power: { iv: 120e3 }, transit: { iv: 15e3 }, news: { iv: 600e3 },
   bom: { iv: 300e3 }, wind: { iv: 1800e3 }, airq: { iv: 900e3 },
-  roads: { iv: 600e3 }, quake: { iv: 600e3 }
+  roads: { iv: 600e3 }, quake: { iv: 600e3 }, watch: { iv: 60e3 }
 };
 function mark(src, ok) {
   const h = HEALTH[src]; if (!h) return;
@@ -1034,7 +1039,7 @@ function feedEvent(kind, src, i, note) {
   if (kind === 'loiter' || kind === 'corr' || kind === 'level' ||
       kind === 'trk' || zone || isTrackedFeed(src, i.id) ||
       (i.detail || '').includes('Emergency Warning') ||
-      (src === 'BOM' && i.detail === 'major'))
+      (src === 'BOM' && i.detail === 'major') || src === 'layer watch')
     notify(`COP ${(FEED_KIND[kind] || ['?'])[0]}: ${i.title}`,
       (zone ? '⌂ ' + zone + ' · ' : '') + (note || i.detail || src));
 }
@@ -1109,6 +1114,7 @@ function toggleTrack(type, id, label) {
   } else TRACKS.push({ type, id, label, added: Date.now() });
   localStorage.setItem('copTracks', JSON.stringify(TRACKS));
   renderTracked();
+  if (type === 'ac') paintLegs();   // untracked: drop its leg (unless its popup's open)
 }
 
 // current position of a tracked entity, or null while it's dark.
@@ -1226,7 +1232,7 @@ function popupTrack(lngLat, html, type, id, label) {
   set();
   btn.onclick = () => { toggleTrack(type, id, label); set(); };
   div.appendChild(btn);
-  new maplibregl.Popup({ offset: 12 }).setLngLat(lngLat)
+  return new maplibregl.Popup({ offset: 12 }).setLngLat(lngLat)
     .setDOMContent(div).addTo(map);
 }
 
@@ -1631,7 +1637,7 @@ map.on('load', () => {
   map.on('click', 'aircraft', e => {
     const p = e.features[0].properties;
     const slot = 'acx-' + p.hex + '-' + Date.now();
-    popupTrack(e.features[0].geometry.coordinates,
+    const pop = popupTrack(e.features[0].geometry.coordinates,
       `<b>${p.callsign}</b> ${p.mil === 'true' ? '⚠ MIL' : ''}<br>
         <div id="${slot}" class="acx" style="color:var(--dim)">looking up…</div>
         type: ${p.type}<br>alt: ${p.alt} ft<br>
@@ -1639,6 +1645,9 @@ map.on('load', () => {
         (p.src === 'local' ? '<br><span style="color:var(--green)">◉ own receiver</span>' : ''),
       'ac', p.hex, p.callsign);
     acEnrich(slot, p.hex, p.callsign === p.hex ? '' : p.callsign);
+    LEGS.open = p.hex;
+    showLeg(p.hex);
+    pop.on('close', () => { if (LEGS.open === p.hex) LEGS.open = null; paintLegs(); });
   });
   map.on('mouseenter', 'aircraft', () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', 'aircraft', () => map.getCanvas().style.cursor = '');
@@ -2140,11 +2149,43 @@ map.on('load', () => {
         `<span style="color:#565f89">location only, as mapped in OSM · ${osmLink(p.osm)}</span>`)
       .addTo(map);
   });
-  for (const id of ['military-fill', 'military-label', 'alpr']) {
+  const INFRA_COL = ['match', ['get', 'sector'], 'data', '#7dcfff',
+    'water', '#7aa2f7', 'energy', '#73daca', 'comms', '#bb9af7',
+    'health', '#9ece6a', '#c0caf5'];
+  map.addSource('infra', { type: 'geojson', data: EMPTY(),
+    attribution: 'infrastructure: © OpenStreetMap contributors (ODbL)' });
+  map.addLayer({ id: 'infra', type: 'circle', source: 'infra',
+    layout: { visibility: 'none' },
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 2.5, 14, 6],
+             'circle-color': INFRA_COL, 'circle-opacity': 0.9,
+             'circle-stroke-color': '#c0caf5', 'circle-stroke-width': 1 } });
+  map.addLayer({ id: 'infra-label', type: 'symbol', source: 'infra',
+    filter: ['!=', ['get', 'name'], ''], minzoom: 12,
+    layout: { visibility: 'none', 'text-field': ['get', 'name'],
+      'text-font': ['Open Sans Regular'], 'text-size': 10,
+      'text-offset': [0, 1.1], 'text-anchor': 'top' },
+    paint: { 'text-color': INFRA_COL, 'text-halo-color': '#16161e',
+             'text-halo-width': 1.5 } });
+  map.on('click', 'infra', e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 8 })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(`<b>${escH(p.name || p.kind)}</b><br>${escH(p.sector)} · ${escH(p.kind)}` +
+        (p.operator ? `<br>operator: ${escH(p.operator)}` : '') +
+        `<br><span style="color:#565f89">as mapped in OpenStreetMap · ${osmLink(p.osm)}</span>`)
+      .addTo(map);
+  });
+  // flight legs: where a clicked/tracked aircraft has come from this flight
+  map.addSource('actrack', { type: 'geojson', data: EMPTY() });
+  map.addLayer({ id: 'actrack', type: 'line', source: 'actrack',
+    paint: { 'line-color': '#7dcfff', 'line-width': 1.6, 'line-opacity': 0.75,
+             'line-dasharray': [2, 1.5] } }, 'aircraft');
+  for (const id of ['military-fill', 'military-label', 'alpr', 'infra']) {
     map.on('mouseenter', id, () => map.getCanvas().style.cursor = 'pointer');
     map.on('mouseleave', id, () => map.getCanvas().style.cursor = '');
   }
 
+  fetchWatch();     setInterval(fetchWatch, 60000);
   fetchAircraft();  setInterval(fetchAircraft, 12000);
   fetchRadar();     setInterval(fetchRadar, 5 * 60000);
   fetchWeather();   setInterval(fetchWeather, 10 * 60000);
@@ -2248,7 +2289,10 @@ function enterReplay(t) {
   document.getElementById('tb-slider').value = t;
   document.getElementById('tb-label').textContent = 'REPLAY ' + tbFmt(t);
   document.getElementById('tb-live').textContent = '▶ GO LIVE';
-  if (wasLive) { clearLiveLayers(); setLiveRastersVisible(false); }
+  if (wasLive) {
+    clearLiveLayers(); setLiveRastersVisible(false);
+    SMOOTH.bus = {}; paintLegs();   // no invented motion or live legs in replay
+  }
   clearTimeout(tbPaintTimer);           // debounce repaint while dragging
   tbPaintTimer = setTimeout(paintIncidents, 150);
 }
@@ -2264,6 +2308,7 @@ function goLive() {
   document.getElementById('tb-live').textContent = '● LIVE';
   if (wasReplay) {
     setLiveRastersVisible(true);
+    paintLegs();
     paintIncidents();   // covers all layers + sidebars via REPLAY_FETCHERS
   }
 }
@@ -2599,9 +2644,11 @@ function acDisplace(lon, lat, altFt) {
 }
 
 function paintAircraft() {  // geometry only — cheap enough to run per frame
-  const feats = [], stems = [];
+  const feats = [], stems = [], now = Date.now();
   for (const f of state.acFeats || []) {
-    const p = acDisplace(f.orig[0], f.orig[1], f.properties.alt);
+    const [lon0, lat0] = acSmoothPos(f, now);
+    f.drawn = [lon0, lat0];
+    const p = acDisplace(lon0, lat0, f.properties.alt);
     feats.push({ type: 'Feature', properties: f.properties,
       geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
     if (p.stem) stems.push({ type: 'Feature',
@@ -2624,12 +2671,19 @@ function acReproject() {
 }
 
 function renderAircraft() {
+  const fetchedAt = Date.now();
+  SMOOTH.acPrev = {};
+  for (const f of state.acFeats || [])
+    if (f.drawn) SMOOTH.acPrev[f.properties.hex] = f.drawn;
   state.acFeats = state.planes.map(a => {
     const mil = ((a.dbFlags || 0) & 1) === 1;
     const alt = a.alt_baro === 'ground' ? 0 : (a.alt_baro || 0);
     const kind = isHeli(a) ? 'heli' : 'plane';
     return {
       orig: [a.lon, a.lat],
+      // fix time = when the position was actually heard, not when we polled
+      fix: { lon: a.lon, lat: a.lat, gs: a.gs || 0, track: a.track,
+             t: fetchedAt - (a.seen_pos ?? a.seen ?? 0) * 1000, at: fetchedAt },
       properties: {
         icon: `${kind}-${mil ? 'mil' : alt < 10000 ? 'lo' : 'hi'}`,
         track: a.track || 0,
@@ -2983,8 +3037,13 @@ async function fetchOsmLayer(src, countId, noun) {
       : geo.features.length;
     count.textContent = `(${n} ${noun})`;
   } catch (e) {
-    count.textContent = '(unavailable)';
-    osmStarted[src] = false;    // next toggle-on tries again
+    // Overpass is slow/overloaded or serve.py is still warming up: keep
+    // retrying while the layer is switched on
+    count.textContent = '(retrying…)';
+    setTimeout(() => {
+      if (document.getElementById('tog-' + src).checked) fetchOsmLayer(src, countId, noun);
+      else osmStarted[src] = false;   // switched off meanwhile: retry on next toggle
+    }, 30000);
   }
 }
 function osmToggle(togId, src, ids, countId, noun) {
@@ -3000,6 +3059,106 @@ function osmToggle(togId, src, ids, countId, noun) {
 osmToggle('tog-military', 'military',
   ['military-fill', 'military-line', 'military-label'], 'military-count', 'sites');
 osmToggle('tog-alpr', 'alpr', ['alpr'], 'alpr-count', 'cameras');
+osmToggle('tog-infra', 'infra', ['infra', 'infra-label'], 'infra-count', 'sites');
+document.getElementById('tog-infra').addEventListener('change', e =>
+  document.getElementById('infra-legend').style.display = e.target.checked ? '' : 'none');
+
+// flight legs (adsb.lol trace via serve.py): shown for the open popup's
+// aircraft plus every tracked one; tracked legs refresh each minute. Live
+// only — hidden in replay, where they'd describe the wrong moment.
+const LEGS = { open: null, geo: {} };   // hex -> Feature
+async function showLeg(hex) {
+  try {
+    const r = await fetch(`actrack?hex=${encodeURIComponent(hex)}`);
+    if (!r.ok) throw new Error(r.status);
+    const fc = await r.json();
+    if (fc.features.length) LEGS.geo[hex] = fc.features[0];
+  } catch (e) { /* no trace: the live trail still shows recent movement */ }
+  paintLegs();
+}
+function paintLegs() {
+  if (!map.getSource('actrack')) return;
+  const want = new Set(TRACKS.filter(t => t.type === 'ac').map(t => t.id));
+  if (LEGS.open) want.add(LEGS.open);
+  for (const hex of Object.keys(LEGS.geo)) if (!want.has(hex)) delete LEGS.geo[hex];
+  map.getSource('actrack').setData({ type: 'FeatureCollection',
+    features: REPLAY ? [] : Object.values(LEGS.geo) });
+}
+const refreshLegs = () => {
+  if (REPLAY || document.hidden) return;
+  for (const t of TRACKS) if (t.type === 'ac') showLeg(t.id);
+};
+setTimeout(refreshLegs, 4000);   // tracked from a previous visit: backfill now
+setInterval(refreshLegs, 60000);
+
+// empty-layer watch: serve.py judges each layer against its own history;
+// the page just shows the verdict — banner, health dot, feed event (which
+// also fires a desktop notification when those are on)
+async function fetchWatch() {
+  try {
+    const r = await fetch('health/watch');
+    if (!r.ok) throw new Error(r.status);
+    const w = await r.json();
+    document.getElementById('watch-alarms').innerHTML = w.alarms
+      .map(a => `<div title="layer watch · since ${new Date(a.since * 1000).toLocaleString()}">⚠ ${escH(a.msg)}</div>`)
+      .join('');
+    feedDiff('layer watch', w.alarms.map(a => ({
+      id: a.kind + ':' + a.what, title: a.msg, status: 'ALARM',
+      cat: 'other', detail: a.kind === 'empty' ? 'layer empty' : 'feed failing' })));
+    mark('watch', true);
+  } catch (e) { mark('watch', false); }
+}
+
+// --- smooth motion -----------------------------------------------------------
+// Aircraft: dead-reckon from the last fix along track at ground speed (capped
+// at 30 s so a lost contact doesn't sail off), easing over 1 s when a new fix
+// lands. Transit: tween each vehicle from where it's drawn to its new report
+// over the poll interval (no speed in the feed to extrapolate with). Replay
+// shows snapshots as recorded — no motion invented there.
+const SMOOTH = { acPrev: {}, bus: {}, BUS_MS: 14000, EASE_MS: 1000, DR_MAX_S: 30 };
+function acSmoothPos(f, now) {
+  const fx = f.fix;
+  if (!fx || REPLAY) return f.orig;
+  let lon = fx.lon, lat = fx.lat;
+  const dt = Math.min(SMOOTH.DR_MAX_S, Math.max(0, (now - fx.t) / 1000));
+  if (fx.gs > 30 && fx.track != null) {      // taxiing/parked: don't drift
+    const nm = fx.gs * dt / 3600, rad = fx.track * Math.PI / 180;
+    lat += (nm / 60) * Math.cos(rad);
+    lon += (nm / 60) * Math.sin(rad) / Math.cos(lat * Math.PI / 180);
+  }
+  const prev = SMOOTH.acPrev[f.properties.hex];
+  if (prev && now - fx.at < SMOOTH.EASE_MS) {   // ease from where it was drawn
+    const k = (now - fx.at) / SMOOTH.EASE_MS;
+    lon = prev[0] + (lon - prev[0]) * k; lat = prev[1] + (lat - prev[1]) * k;
+  }
+  return [lon, lat];
+}
+function busStep(now) {
+  if (!map.getSource('transit') || !state.transitFeats) return;
+  for (const f of state.transitFeats) {
+    const b = SMOOTH.bus[f.properties.label || f.properties.route];
+    if (!b) continue;
+    const k = Math.min(1, (now - b.t0) / SMOOTH.BUS_MS);
+    f.geometry.coordinates = [b.from[0] + (b.to[0] - b.from[0]) * k,
+                              b.from[1] + (b.to[1] - b.from[1]) * k];
+  }
+  map.getSource('transit').setData({ type: 'FeatureCollection',
+    features: state.transitFeats });
+}
+// every tick is a map repaint: ~10 fps on a desktop, ~4 on phone-sized
+// screens to spare the battery (still far smoother than 12-15 s jumps)
+let smoothLast = 0;
+const SMOOTH_MS = () => innerWidth < 700 ? 250 : 100;
+function smoothTick(ts) {
+  requestAnimationFrame(smoothTick);
+  if (REPLAY || document.hidden || ts - smoothLast < SMOOTH_MS()) return;
+  smoothLast = ts;
+  const now = Date.now();
+  if ((state.acFeats || []).length &&
+      document.getElementById('tog-ac').checked) paintAircraft();
+  if (document.getElementById('tog-transit').checked) busStep(now);
+}
+requestAnimationFrame(smoothTick);
 
 // recent satellite pass: serve.py lists HLS days over the ACT (CMR); tiles
 // come straight from NASA GIBS. Sits just above the basemaps, under
@@ -3373,6 +3532,21 @@ async function fetchTransit() {
       if (!last || last[0] !== lon || last[1] !== lat) h.pts.push([lon, lat, now]);
       if (h.pts.length > (isTracked('transit', id) ? 120 : 16)) h.pts.shift();
     });
+    if (!wasReplay) {   // tween from the drawn position to the new report
+      const t0 = Date.now(), drawn = {};
+      for (const f of state.transitFeats || [])
+        drawn[f.properties.label || f.properties.route] = f.geometry.coordinates;
+      const bus = {};
+      for (const f of geo.features) {
+        const id = f.properties.label || f.properties.route;
+        const to = f.geometry.coordinates.slice(), from = drawn[id];
+        // unseen, or jumped >2 km (new trip / GPS glitch): just place it
+        const far = from && Math.hypot((to[0] - from[0]) * 0.82, to[1] - from[1]) > 0.018;
+        bus[id] = { from: from && !far ? from.slice() : to, to, t0 };
+        f.geometry.coordinates = bus[id].from.slice();
+      }
+      SMOOTH.bus = bus;
+    }
     state.transitFeats = geo.features;
     map.getSource('transit').setData(geo);
     count.textContent = `(${geo.features.length})`;

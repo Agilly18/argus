@@ -150,8 +150,11 @@ def stale_ok(cache, label):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             try:
-                return fn(*args, **kwargs)
+                body = fn(*args, **kwargs)
+                watch_ok(label)
+                return body
             except Exception as exc:
+                watch_fail(label, exc)
                 age = time.time() - cache["time"]
                 if cache["time"] and age < STALE_MAX_SECONDS:
                     print(f"[argus] {label} upstream failed ({exc}); "
@@ -250,7 +253,7 @@ def news_body():
 # (a browser can't) and bias results to the Canberra region. Results are
 # cached per query and upstream calls throttled to Nominatim's 1 req/s limit.
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-GEOCODE_UA = "argus/0.10 (personal situational-awareness map)"
+GEOCODE_UA = "argus/0.11 (personal situational-awareness map)"
 # lon,lat,lon,lat box around the ACT — biases but doesn't hard-limit results
 GEOCODE_VIEWBOX = "148.6,-35.05,149.5,-35.65"
 GEOCODE_CACHE_SECONDS = 3600
@@ -569,14 +572,22 @@ def _ee_parse(kml_bytes, sev_default):
     return feats
 
 
+POWER_FETCH_NAMES = {"_evo_features": "power/Evoenergy feed",
+                     "_ee_current_features": "power/Essential Energy current feed",
+                     "_ee_future_features": "power/Essential Energy scheduled feed"}
+
+
 @stale_ok(_power_cache, "power")
 def power_body():
     if time.time() - _power_cache["time"] > POWER_CACHE_SECONDS:
         feats = []
         for fetch in (_evo_features, _ee_current_features, _ee_future_features):
+            name = POWER_FETCH_NAMES.get(fetch.__name__, fetch.__name__)
             try:
                 feats.extend(fetch())
+                watch_ok(name)
             except Exception as exc:  # one utility down shouldn't blank the other
+                watch_fail(name, exc)
                 print(f"[argus] power: {fetch.__name__} failed ({exc})",
                       flush=True)
         _power_cache.update(time=time.time(), body=json.dumps(
@@ -1029,6 +1040,63 @@ def acinfo_body(hex_, callsign):
     return json.dumps(out).encode()
 
 
+# --- flight track backfill (adsb.lol traces) --------------------------------
+# readsb trace files: `trace` rows are [dt, lat, lon, alt, gs, track, flags,
+# ...] offset from `timestamp`; flags bit 2 marks the start of a new leg. We
+# return just the current leg, so a click shows where THIS flight came from,
+# not the aircraft's whole day. trace_full lags a few minutes, so the tail is
+# topped up from trace_recent.
+TRACE_BASE = "https://adsb.lol/data/traces"
+TRACE_CACHE_SECONDS = 60
+TRACE_MAX_POINTS = 600
+RATELIMIT_TRACK_PER_MIN = int(_cfg("RATELIMIT_TRACK_PER_MIN", "20"))
+_track_cache = {}
+
+
+def _trace(hex_, kind):
+    req = urllib.request.Request(f"{TRACE_BASE}/{hex_[-2:]}/trace_{kind}_{hex_}.json",
+                                 headers={"User-Agent": GEOCODE_UA,
+                                          "Referer": "https://adsb.lol/"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return []
+        raise
+    if raw[:2] == b"\x1f\x8b":   # served pre-gzipped, header or not
+        raw = gzip.decompress(raw)
+    d = json.loads(raw)
+    base = d.get("timestamp", 0)
+    return [(base + p[0], p) for p in d.get("trace", []) if len(p) > 6]
+
+
+def actrack_body(hex_):
+    """GeoJSON LineString of the aircraft's current leg, or an empty FC."""
+    hit = _track_cache.get(hex_)
+    if hit and time.time() - hit[0] < TRACE_CACHE_SECONDS:
+        return hit[1]
+    pts = _trace(hex_, "full")
+    last_t = pts[-1][0] if pts else 0
+    pts += [x for x in _trace(hex_, "recent") if x[0] > last_t]
+    start = max((i for i, (_, p) in enumerate(pts) if (p[6] or 0) & 2),
+                default=0)
+    leg = [(t, p) for t, p in pts[start:] if p[1] is not None and p[2] is not None]
+    step = max(1, len(leg) // TRACE_MAX_POINTS)
+    if leg:
+        leg = leg[::step] + ([] if (len(leg) - 1) % step == 0 else [leg[-1]])
+    fc = {"type": "FeatureCollection", "features": []}
+    if len(leg) >= 2:
+        fc["features"].append({"type": "Feature", "properties": {
+            "hex": hex_, "from": int(leg[0][0]), "to": int(leg[-1][0]),
+            "points": len(leg)}, "geometry": {"type": "LineString",
+            "coordinates": [[round(p[2], 5), round(p[1], 5)] for _, p in leg]}})
+    body = json.dumps(fc).encode()
+    _track_cache[hex_] = (time.time(), body)
+    _prune_cache(_track_cache, 500)
+    return body
+
+
 # --- OpenStreetMap context layers (Overpass) ---------------------------------
 # Static-ish reference data: military land + ALPR cameras around the ACT.
 # Refreshed weekly; a failed refresh keeps the last good copy indefinitely
@@ -1052,16 +1120,31 @@ def _overpass(query):
             req = urllib.request.Request(
                 url, data=urllib.parse.urlencode({"data": query}).encode(),
                 headers={"User-Agent": GEOCODE_UA})
-            with urllib.request.urlopen(req, timeout=120) as r:
+            # these queries answer in seconds when Overpass is healthy; a
+            # long wait means a queued/overloaded mirror — move on
+            with urllib.request.urlopen(req, timeout=25) as r:
                 return json.loads(r.read())["elements"]
         except Exception as exc:
             last = exc
     raise last
 
 
+_osm_lock = threading.Lock()   # one Overpass query at a time: be polite
+
+
 def _static_osm(cache, label, build):
     """Serve `cache`, rebuilding weekly; keep the old copy on failure."""
-    if time.time() - cache["time"] > OSM_CACHE_SECONDS:
+    if time.time() - cache["time"] <= OSM_CACHE_SECONDS:
+        return cache["body"]
+    # one Overpass build at a time; anyone arriving mid-build gets the old
+    # copy, or a fast failure (the page retries) — never a minutes-long queue
+    if not _osm_lock.acquire(blocking=False):
+        if cache["body"]:
+            return cache["body"]
+        raise RuntimeError(f"{label} still loading")
+    try:
+        if time.time() - cache["time"] <= OSM_CACHE_SECONDS:
+            return cache["body"]
         try:
             cache.update(time=time.time(), body=json.dumps(
                 {"type": "FeatureCollection", "features": build()}).encode())
@@ -1071,7 +1154,29 @@ def _static_osm(cache, label, build):
             print(f"[argus] {label} refresh failed ({exc}); keeping "
                   f"last copy, retry in 1 h", flush=True)
             cache["time"] = time.time() - OSM_CACHE_SECONDS + 3600
-    return cache["body"]
+        return cache["body"]
+    finally:
+        _osm_lock.release()
+
+
+def _warm_static():
+    """Fetch the OSM layers at startup so the first toggle is instant;
+    Overpass has slow patches, so retry stragglers a few times."""
+    todo = [military_body, alpr_body, infra_body]
+    for attempt in range(4):
+        failed = []
+        for fn in todo:
+            try:
+                fn()
+            except Exception as exc:
+                failed.append(fn)
+                print(f"[argus] warm-up: {fn.__name__} failed ({exc})",
+                      flush=True)
+            time.sleep(5)   # spacing between Overpass queries
+        if not failed:
+            return
+        todo = failed
+        time.sleep(300 * (attempt + 1))
 
 
 def _osm_geoms(el):
@@ -1151,6 +1256,64 @@ def _alpr_features():
                  "zone": e.get("tags", {}).get("surveillance:zone", ""),
                  "osm": f"node/{e['id']}"}}
             for e in els if e.get("type") == "node"]
+
+
+# critical infrastructure: SOCI-style sectors that matter for a local
+# picture. Points only (`out center`) — these are reference pins, not
+# footprints. Unnamed farm dams (hundreds of them) are dropped.
+INFRA_QUERY = ("[out:json][timeout:90];("
+               "nwr[\"telecom\"=\"data_center\"]({b});"
+               "nwr[\"building\"=\"data_center\"]({b});"
+               "nwr[\"waterway\"=\"dam\"][\"name\"]({b});"
+               "nwr[\"man_made\"~\"^(water_works|wastewater_plant|reservoir_covered)$\"]({b});"
+               "nwr[\"power\"~\"^(substation|plant)$\"]({b});"
+               "nwr[\"telecom\"=\"exchange\"]({b});"
+               "nwr[\"tower:type\"=\"communication\"][\"name\"]({b});"
+               "nwr[\"amenity\"=\"hospital\"]({b});"
+               ");out center tags;")
+_infra_cache = {"time": 0.0, "body": b""}
+
+
+def _infra_sector(t):
+    if "data_center" in (t.get("telecom"), t.get("building")):
+        return "data"
+    if t.get("waterway") == "dam" or t.get("man_made") in (
+            "water_works", "wastewater_plant", "reservoir_covered"):
+        return "water"
+    if t.get("power") in ("substation", "plant"):
+        return "energy"
+    if t.get("telecom") == "exchange" or t.get("tower:type") == "communication":
+        return "comms"
+    if t.get("amenity") == "hospital":
+        return "health"
+    return None
+
+
+def _infra_features():
+    feats, seen = [], set()
+    for el in _overpass(INFRA_QUERY.format(b=OSM_BBOX)):
+        t = el.get("tags", {})
+        sector = _infra_sector(t)
+        c = el.get("center") or ({"lon": el.get("lon"), "lat": el.get("lat")}
+                                 if "lon" in el else None)
+        key = f"{el['type']}/{el['id']}"
+        if not sector or not c or key in seen:
+            continue
+        seen.add(key)
+        kind = (t.get("power") or t.get("man_made") or t.get("waterway")
+                or t.get("telecom") or t.get("amenity") or "")
+        if t.get("tower:type") == "communication":
+            kind = "comms tower"
+        feats.append({"type": "Feature",
+                      "geometry": {"type": "Point", "coordinates": [c["lon"], c["lat"]]},
+                      "properties": {"sector": sector, "name": t.get("name", ""),
+                                     "operator": t.get("operator", ""),
+                                     "kind": kind.replace("_", " "), "osm": key}})
+    return feats
+
+
+def infra_body():
+    return _static_osm(_infra_cache, "infra", _infra_features)
 
 
 def military_body():
@@ -1254,7 +1417,7 @@ def webcams_body():
     if time.time() - _webcams_cache["time"] > WEBCAMS_CACHE_SECONDS:
         req = urllib.request.Request(
             WEBCAMS_URL, headers={"x-windy-api-key": WINDY_KEY,
-                                  "User-Agent": "argus/0.10"})
+                                  "User-Agent": "argus/0.11"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read())
         feats = []
@@ -1638,6 +1801,217 @@ def _prune():
         c.execute("DELETE FROM snapshots WHERE t < ?", (cutoff,))
 
 
+# --- empty-layer watch --------------------------------------------------------
+# Three silent failures in Sep 2026 — Evoenergy blanked by one malformed row,
+# ESA dropping every ambulance record, Essential Energy's future.kml going 404
+# — all kept serving 200 OK with a plausible but hollow layer, and nothing
+# noticed. This watches per-group feature counts plus upstream errors, learns
+# from the history DB how long each group is normally empty, and raises an
+# alarm when one stays empty (or a fetch keeps failing) for longer than that.
+# Feeds where empty is simply "quiet" (rfs, firms, quakes, bom) aren't watched.
+WATCH_FLOOR_S = int(_cfg("WATCH_EMPTY_FLOOR_MIN", "30")) * 60
+WATCH_FAIL_S = int(_cfg("WATCH_FAIL_MIN", "60")) * 60
+WATCH_FORGET_S = 30 * 86400   # a group empty this long is dropped, not nagged
+WATCH_STATE = os.path.join(os.path.dirname(os.path.abspath(HISTORY_DB)),
+                           "layer-watch.json")
+TELEGRAM_BOT_TOKEN = _cfg("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = _cfg("TELEGRAM_CHAT_ID", "")
+_watch_lock = threading.Lock()
+_watch = {"groups": {}, "fails": {}, "alarms": {}, "baseline_at": 0.0}
+
+
+def _watch_groups(source, body):
+    """{group: count} for one recorded body ({} = source not watched)."""
+    d = json.loads(body)
+    if source == "power":
+        g = {"power/Evoenergy": 0, "power/Essential Energy": 0}
+        for f in d.get("features", []):
+            if f.get("geometry", {}).get("type") == "Point":
+                k = "power/" + f.get("properties", {}).get("src", "?")
+                g[k] = g.get(k, 0) + 1
+        return g
+    if source == "esa":
+        return {"esa/all": len(d), "esa/ambulance": sum(
+            1 for i in d if (i.get("title") or "").upper().startswith("AMBULANCE"))}
+    if source == "transit":
+        g = {"transit/lightrail": 0, "transit/bus": 0}
+        for f in d.get("features", []):
+            k = "transit/" + (f.get("properties", {}).get("mode") or "?")
+            g[k] = g.get(k, 0) + 1
+        return g
+    if source == "aircraft":
+        return {"aircraft": len(d.get("ac", []))}
+    if source in ("airq", "closures"):
+        return {source: len(d.get("features", []))}
+    if source == "news":
+        return {"news": len(d)}
+    return {}
+
+
+def _fmt_dur(sec):
+    sec = int(sec)
+    if sec < 3600:
+        return f"{sec // 60} min"
+    if sec < 86400:
+        return f"{sec // 3600} h {sec % 3600 // 60:02d} min"
+    return f"{sec // 86400} d {sec % 86400 // 3600} h"
+
+
+def _watch_baseline():
+    """Replay the history window: per group, the longest COMPLETED empty
+    stretch (the "normal" gap) and when it was last non-empty. Snapshots are
+    change-driven, so a snapshot's count holds until the next one."""
+    runs = {}   # group -> {"zero_since", "max_gap", "last_nonzero"}
+    with _db_conn() as c:
+        for source in HISTORY_SOURCES:
+            for t, blob in c.execute("SELECT t, body FROM snapshots WHERE "
+                                     "source=? ORDER BY t", (source,)):
+                try:
+                    groups = _watch_groups(source, gzip.decompress(blob))
+                except Exception:
+                    continue
+                for g, n in groups.items():
+                    r = runs.setdefault(g, {"zero_since": None, "max_gap": 0,
+                                            "last_nonzero": None})
+                    if n > 0:
+                        if r["zero_since"] is not None and r["last_nonzero"]:
+                            r["max_gap"] = max(r["max_gap"], t - r["zero_since"])
+                        r["zero_since"] = None
+                        r["last_nonzero"] = t
+                    elif r["zero_since"] is None:
+                        r["zero_since"] = t
+    now = time.time()
+    with _watch_lock:
+        for g, r in runs.items():
+            st = _watch["groups"].setdefault(g, {"count": None,
+                                                 "last_nonzero": None})
+            st["max_gap"] = r["max_gap"]
+            if r["last_nonzero"] is not None:
+                # non-empty until the snapshot that emptied it (or still now)
+                seen = r["zero_since"] if r["zero_since"] else now
+                st["last_nonzero"] = max(st["last_nonzero"] or 0, seen)
+        _watch["baseline_at"] = now
+
+
+def _watch_load():
+    try:
+        with open(WATCH_STATE) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    with _watch_lock:
+        for g, ts in saved.get("last_nonzero", {}).items():
+            _watch["groups"].setdefault(g, {"count": None, "max_gap": 0,
+                                            "last_nonzero": None})
+            _watch["groups"][g]["last_nonzero"] = ts
+
+
+def _watch_save():
+    with _watch_lock:
+        data = {"last_nonzero": {g: st["last_nonzero"] for g, st in
+                                 _watch["groups"].items() if st["last_nonzero"]}}
+    tmp = WATCH_STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, WATCH_STATE)
+
+
+def _watch_observe(source, body):
+    try:
+        groups = _watch_groups(source, body)
+    except Exception:
+        return
+    now = time.time()
+    with _watch_lock:
+        for g, n in groups.items():
+            st = _watch["groups"].setdefault(g, {"count": None, "max_gap": 0,
+                                                 "last_nonzero": None})
+            st["count"] = n
+            if n > 0:
+                st["last_nonzero"] = now
+
+
+def watch_ok(key):
+    with _watch_lock:
+        _watch["fails"].pop(key, None)
+
+
+def watch_fail(key, exc):
+    with _watch_lock:
+        f = _watch["fails"].setdefault(key, {"first": time.time()})
+        f["last"], f["err"] = time.time(), str(exc)[:160]
+
+
+def _telegram(text):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    def send():
+        try:
+            data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID,
+                                           "text": text}).encode()
+            urllib.request.urlopen(urllib.request.Request(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data=data), timeout=15).read()
+        except Exception as exc:
+            print(f"[argus] watch: telegram send failed ({exc})", flush=True)
+    threading.Thread(target=send, daemon=True).start()
+
+
+def _watch_evaluate():
+    now = time.time()
+    alarms = {}
+    with _watch_lock:
+        for g, st in list(_watch["groups"].items()):
+            last = st.get("last_nonzero")
+            if last and now - last > WATCH_FORGET_S:
+                print(f"[argus] watch: forgetting {g} (empty "
+                      f"{_fmt_dur(now - last)})", flush=True)
+                del _watch["groups"][g]
+                continue
+            # watched only once seen non-empty; judged only on a live reading
+            if not last or st.get("count") != 0:
+                continue
+            gap, normal = now - last, st.get("max_gap", 0)
+            limit = max(WATCH_FLOOR_S, 1.5 * normal)
+            if gap > limit:
+                alarms["empty:" + g] = {
+                    "kind": "empty", "what": g, "since": int(last),
+                    "msg": f"{g} has been empty for {_fmt_dur(gap)} "
+                           f"(longest normal gap: {_fmt_dur(normal)})"}
+        for k, f in list(_watch["fails"].items()):
+            if now - f.get("last", 0) > 1800:
+                del _watch["fails"][k]   # nobody's asking any more (on-demand
+                continue                 # feeds): stale, not failing
+            if now - f["first"] > WATCH_FAIL_S:
+                alarms["fail:" + k] = {
+                    "kind": "failing", "what": k, "since": int(f["first"]),
+                    "msg": f"{k} failing for {_fmt_dur(now - f['first'])}: "
+                           f"{f.get('err', '?')}"}
+        prev = _watch["alarms"]
+        _watch["alarms"] = alarms
+    for k in alarms.keys() - prev.keys():
+        print(f"[argus] WATCH ALARM: {alarms[k]['msg']}", flush=True)
+        _telegram("⚠ Argus layer alarm: " + alarms[k]["msg"])
+    for k in prev.keys() - alarms.keys():
+        print(f"[argus] watch cleared: {prev[k]['what']}", flush=True)
+        _telegram("✓ Argus: " + prev[k]["what"] + " is back")
+
+
+def watch_body():
+    now = time.time()
+    with _watch_lock:
+        return json.dumps({
+            "alarms": sorted(_watch["alarms"].values(), key=lambda a: a["since"]),
+            "groups": {g: {"count": st.get("count"),
+                           "last_nonzero": int(st["last_nonzero"]) if st.get("last_nonzero") else None,
+                           "normal_gap": int(st.get("max_gap", 0))}
+                       for g, st in sorted(_watch["groups"].items())},
+            "failing": {k: {"since": int(f["first"]), "err": f.get("err")}
+                        for k, f in _watch["fails"].items()},
+            "baseline_age": int(now - _watch["baseline_at"]) if _watch["baseline_at"] else None,
+            "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)}).encode()
+
+
 def _recorder():
     _db_init()
     # seed last-hash from the newest stored snapshot per source so a restart
@@ -1652,8 +2026,13 @@ def _recorder():
                         gzip.decompress(row[0])).hexdigest()
     except Exception:
         pass
+    _watch_load()
+    try:
+        _watch_baseline()
+    except Exception as exc:
+        print(f"[argus] watch: baseline failed ({exc})", flush=True)
     next_due = {s: 0.0 for s in HISTORY_SOURCES}
-    last_prune = 0.0
+    last_prune = last_eval = 0.0
     while True:
         now = time.time()
         for source, (fn, interval) in HISTORY_SOURCES.items():
@@ -1661,9 +2040,20 @@ def _recorder():
                 continue
             next_due[source] = now + interval
             try:
-                _record(source, fn())
+                body = fn()
+                _record(source, body)
+                _watch_observe(source, body)
             except Exception:
                 pass  # a dead feed (or missing API key) mustn't stop the rest
+        if now - last_eval > 60:
+            last_eval = now
+            try:
+                if now - _watch["baseline_at"] > 6 * 3600:
+                    _watch_baseline()
+                _watch_evaluate()
+                _watch_save()
+            except Exception as exc:
+                print(f"[argus] watch: evaluate failed ({exc})", flush=True)
         if now - last_prune > 3600:
             last_prune = now
             try:
@@ -2032,7 +2422,28 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/actrack"):
+            hex_ = urllib.parse.parse_qs(urllib.parse.urlparse(
+                self.path).query).get("hex", [""])[0].strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{6}", hex_):
+                self.send_error(400, "bad hex")
+                return
+            if self.too_many("actrack", RATELIMIT_TRACK_PER_MIN):
+                return
+            try:
+                body = actrack_body(hex_)
+            except Exception:
+                self.send_error(502, "track source unreachable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         for route, fn, what in (("/military", military_body, "OSM military"),
+                                ("/infra", infra_body, "OSM infrastructure"),
+                                ("/health/watch", watch_body, "layer watch"),
                                 ("/alpr", alpr_body, "OSM ALPR"),
                                 ("/imagery", imagery_body, "imagery catalog")):
             if self.path.rstrip("/") == route:
@@ -2149,5 +2560,6 @@ if __name__ == "__main__":
     print("Argus → http://localhost:8899/poc.html  (Ctrl-C to stop)")
     # Always-on recorder feeds the time slider; runs even with no viewers.
     threading.Thread(target=_recorder, daemon=True).start()
+    threading.Thread(target=_warm_static, daemon=True).start()
     # Threading: one slow upstream fetch must not stall every other request
     ThreadingHTTPServer(("0.0.0.0", 8899), Handler).serve_forever()
